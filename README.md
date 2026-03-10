@@ -96,6 +96,13 @@ python build.py
 
 ---
 
+## Feedback & Support
+
+Found a bug? Have a suggestion? Hit me up on Reddit:
+**u/Intelligent_Word4780** — [reddit.com/user/Intelligent_Word4780](https://www.reddit.com/user/Intelligent_Word4780)
+
+---
+
 ## Uninstall
 
 1. Delete `CommandCenter.exe`
