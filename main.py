@@ -20,6 +20,7 @@ __version__   = "1.0.0"
 import sys
 import os
 import re
+import logging
 import configparser
 import threading
 
@@ -40,20 +41,81 @@ def elevate():
 if sys.platform == "win32" and not is_admin():
     elevate()
 
+# ── Logging — must be set up BEFORE importing hardware.py so its init logs
+#    are captured to the log file.
+def _setup_logging():
+    """Redirect stdout/stderr to a rolling log file in %APPDATA%."""
+    import traceback
+
+    log_base = os.path.join(
+        os.environ.get("APPDATA", os.path.dirname(os.path.abspath(sys.argv[0]))),
+        "CommandCenter"
+    )
+    os.makedirs(log_base, exist_ok=True)
+    log_path = os.path.join(log_base, "CommandCenter.log")
+
+    logging.basicConfig(
+        filename   = log_path,
+        filemode   = "a",
+        level      = logging.DEBUG,
+        format     = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt    = "%Y-%m-%d %H:%M:%S",
+    )
+
+    # Mirror print() → log file
+    class _LogStream:
+        def __init__(self, level):
+            self._level = level
+            self._buf   = ""
+        def write(self, msg):
+            self._buf += msg
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    logging.log(self._level, line)
+        def flush(self):
+            pass
+
+    sys.stdout = _LogStream(logging.INFO)
+    sys.stderr = _LogStream(logging.WARNING)
+
+    # Catch unhandled exceptions
+    def _excepthook(exc_type, exc_value, exc_tb):
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.critical("UNHANDLED EXCEPTION:\n%s", msg)
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Command Center -- Crash",
+                                 f"An unexpected error occurred:\n\n{exc_value}\n\n"
+                                 f"See {log_path} for full details.")
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
+
+    logging.info("=" * 60)
+    logging.info("Command Center v%s starting  (admin=%s)", __version__, is_admin())
+    logging.info("=" * 60)
+    return log_path
+
+_LOG_PATH = _setup_logging()
+
 import collections
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout,
     QVBoxLayout, QHBoxLayout, QLabel, QDialog,
     QComboBox, QCheckBox, QPushButton, QFormLayout,
-    QDialogButtonBox, QMenu, QSizePolicy
+    QDialogButtonBox, QMenu, QSizePolicy, QSystemTrayIcon
 )
 from PyQt6.QtCore import Qt, QTimer, QRectF, QRect, QPointF, QSize
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont,
-    QLinearGradient, QPainterPath, QPalette, QAction
+    QLinearGradient, QPainterPath, QPalette, QAction, QIcon
 )
 
 from hardware import HardwareMonitor, HW_PROFILE, hwinfo_available
+
+log = logging.getLogger(__name__)
 
 # ── App data directory — writable on all machines (avoids Program Files issues) ─
 _APP_DATA = os.path.join(
@@ -630,13 +692,14 @@ class TitleBar(QWidget):
     sig_fullscreen = None
     sig_close      = None
 
-    def __init__(self, on_settings, on_fullscreen, on_close, parent=None):
+    def __init__(self, on_settings, on_fullscreen, on_minimize, on_close, parent=None):
         super().__init__(parent)
         self._on_settings   = on_settings
         self._on_fullscreen = on_fullscreen
+        self._on_minimize   = on_minimize
         self._on_close      = on_close
         self._drag_pos      = None
-        self._hovered       = None   # "settings" | "fs" | "close"
+        self._hovered       = None   # "settings" | "fs" | "min" | "close"
         self.setFixedHeight(34)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
@@ -645,13 +708,15 @@ class TitleBar(QWidget):
     def _btn_rects(self):
         bw, bh = 32, 24
         y  = (self.height() - bh) // 2
-        x3 = self.width() - bw - 6
+        x4 = self.width() - bw - 6
+        x3 = x4 - bw - 4
         x2 = x3 - bw - 4
         x1 = x2 - bw - 4
         return {
             "settings": QRect(x1, y, bw, bh),
             "fs":       QRect(x2, y, bw, bh),
-            "close":    QRect(x3, y, bw, bh),
+            "min":      QRect(x3, y, bw, bh),
+            "close":    QRect(x4, y, bw, bh),
         }
 
     def paintEvent(self, _):
@@ -688,7 +753,7 @@ class TitleBar(QWidget):
 
         # Buttons
         rects = self._btn_rects()
-        icons = {"settings": "⚙", "fs": "⛶", "close": "✕"}
+        icons = {"settings": "⚙", "fs": "⛶", "min": "—", "close": "✕"}
         for key, rect in rects.items():
             # Hover bg
             if self._hovered == key:
@@ -727,6 +792,7 @@ class TitleBar(QWidget):
             rects = self._btn_rects()
             if rects["settings"].contains(pos):  self._on_settings()
             elif rects["fs"].contains(pos):      self._on_fullscreen()
+            elif rects["min"].contains(pos):     self._on_minimize()
             elif rects["close"].contains(pos):   self._on_close()
             self._drag_pos = None
 
@@ -1495,6 +1561,7 @@ class CommandCenter(QMainWindow):
         self._pre_fs_geo    = None   # saved geometry before going fullscreen
 
         self._build_ui()
+        self._setup_tray()
         self._apply_monitor()
 
         self._timer = QTimer(self)
@@ -1506,6 +1573,64 @@ class CommandCenter(QMainWindow):
         self._data_lock    = threading.Lock()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
+
+    # ── System tray icon ──────────────────────────────────────────────────────
+    def _setup_tray(self):
+        self._tray = QSystemTrayIcon(self)
+
+        # Use the bundled icon if available, otherwise fall back to a generic one
+        icon_path = None
+        candidates = [
+            os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "icon.ico"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"),
+        ]
+        if hasattr(sys, "_MEIPASS"):
+            candidates.insert(0, os.path.join(sys._MEIPASS, "icon.ico"))
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                icon_path = candidate
+                break
+
+        if icon_path:
+            self._tray.setIcon(QIcon(icon_path))
+        else:
+            self._tray.setIcon(self.style().standardIcon(
+                self.style().StandardPixmap.SP_ComputerIcon))
+
+        self._tray.setToolTip("Command Center")
+
+        # Context menu
+        tray_menu = QMenu()
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self._tray_show)
+        tray_menu.addAction(show_action)
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self._tray_quit)
+        tray_menu.addAction(quit_action)
+
+        self._tray.setContextMenu(tray_menu)
+        self._tray.activated.connect(self._tray_activated)
+        self._tray.show()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_show()
+
+    def _tray_show(self):
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _tray_quit(self):
+        self._tray.hide()
+        QApplication.quit()
+
+    def closeEvent(self, event):
+        """Minimize to tray instead of quitting."""
+        event.ignore()
+        self.hide()
+        log.info("Minimized to system tray")
 
     # ── Position on correct monitor ──────────────────────────────────────────
     def _apply_monitor(self):
@@ -1536,7 +1661,8 @@ class CommandCenter(QMainWindow):
         self._title_bar = TitleBar(
             on_settings   = self._open_settings,
             on_fullscreen = self.toggle_fullscreen,
-            on_close      = self.close,
+            on_minimize   = self.close,      # closeEvent minimizes to tray
+            on_close      = self._tray_quit,  # actually quit
             parent        = root,
         )
         root_vbox.addWidget(self._title_bar)
@@ -1801,66 +1927,5 @@ def main():
     sys.exit(app.exec())
 
 
-def _setup_logging():
-    """Redirect stdout/stderr to a rolling log file next to the EXE."""
-    import logging
-    import traceback
-
-    # Resolve log path — always use %APPDATA%\CommandCenter so it's writable
-    # even when the EXE lives in a protected directory (e.g. Program Files).
-    log_base = os.path.join(
-        os.environ.get("APPDATA", os.path.dirname(os.path.abspath(sys.argv[0]))),
-        "CommandCenter"
-    )
-    os.makedirs(log_base, exist_ok=True)
-    log_path = os.path.join(log_base, "CommandCenter.log")
-
-    logging.basicConfig(
-        filename   = log_path,
-        filemode   = "a",
-        level      = logging.DEBUG,
-        format     = "%(asctime)s [%(levelname)s] %(message)s",
-        datefmt    = "%Y-%m-%d %H:%M:%S",
-    )
-
-    # Mirror print() → log file
-    class _LogStream:
-        def __init__(self, level):
-            self._level = level
-            self._buf   = ""
-        def write(self, msg):
-            self._buf += msg
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                if line.strip():
-                    logging.log(self._level, line)
-        def flush(self):
-            pass
-
-    sys.stdout = _LogStream(logging.INFO)
-    sys.stderr = _LogStream(logging.WARNING)
-
-    # Catch unhandled exceptions
-    def _excepthook(exc_type, exc_value, exc_tb):
-        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        logging.critical("UNHANDLED EXCEPTION:\n%s", msg)
-        # Also try to show a message box if Qt is up
-        try:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(None, "Command Center — Crash",
-                                 f"An unexpected error occurred:\n\n{exc_value}\n\n"
-                                 f"See {log_path} for full details.")
-        except Exception:
-            pass
-
-    sys.excepthook = _excepthook
-
-    logging.info("=" * 60)
-    logging.info("Command Center starting")
-    logging.info("=" * 60)
-    return log_path
-
-
 if __name__ == "__main__":
-    _setup_logging()
     main()

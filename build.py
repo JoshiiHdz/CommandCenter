@@ -68,7 +68,7 @@ def make_icon():
         img.save(ICON, format="ICO", sizes=[(256, 256), (64, 64), (32, 32), (16, 16)])
         print("[+] icon.ico generated")
     except ImportError:
-        print("[!] Pillow not installed — skipping icon (EXE will use default)")
+        print("[!] Pillow not installed -- skipping icon (EXE will use default)")
 
 # ── Build ─────────────────────────────────────────────────────────────────
 def build():
@@ -94,13 +94,14 @@ def build():
 
     if os.path.exists(ICON):
         args += ["--icon", ICON]
+        args += ["--add-data", f"{ICON};."]   # also bundle for system tray icon
 
     # Bundle LHM DLL if present
     if os.path.exists(LHM_DLL):
         args += ["--add-binary", f"{LHM_DLL};."]
         print("[+] LibreHardwareMonitorLib.dll will be bundled")
     else:
-        print("[!] LibreHardwareMonitorLib.dll NOT found — CPU temps via WMI fallback only")
+        print("[!] LibreHardwareMonitorLib.dll NOT found -- CPU temps via WMI fallback only")
         print("    Download from: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases")
 
     # ── Hidden imports ────────────────────────────────────────────────────────
@@ -134,15 +135,15 @@ def build():
 
     args += [os.path.join(HERE, "main.py")]
 
-    print("\n[+] Running PyInstaller…")
+    print("\n[+] Running PyInstaller...")
     result = subprocess.run(args, cwd=HERE)
 
     if result.returncode == 0:
         exe = os.path.join(DIST, "CommandCenter.exe")
-        print(f"\n✅  Build successful → {exe}")
-        print("    Right-click → Run as Administrator, or set UAC to auto-elevate.")
+        print(f"\n[OK] Build successful -> {exe}")
+        print("    Right-click -> Run as Administrator, or set UAC to auto-elevate.")
     else:
-        print("\n❌  Build failed — check output above.")
+        print("\n[FAIL] Build failed -- check output above.")
         sys.exit(1)
 
 

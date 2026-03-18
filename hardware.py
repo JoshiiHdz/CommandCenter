@@ -17,12 +17,15 @@ RAM / Disk / Network — psutil
 import os
 import sys
 import time
+import logging
 import dataclasses
 import collections
 import ctypes
 import ctypes.wintypes
 
 import psutil
+
+log = logging.getLogger(__name__)
 
 # ── HWiNFO64 Shared Memory ────────────────────────────────────────────────────
 HWINFO_SM_NAME = "Global\\HWiNFO_SENS_SM2"
@@ -67,10 +70,9 @@ def hwinfo_available() -> bool:
 
 def _hwinfo_read_all(d: "SensorData"):
     """
-    Single sliding-window scan of HWiNFO shared memory.
+    Parse HWiNFO64 shared memory using the proper header-driven layout.
     Populates: d.cpu_temp, d.fans, d.cpu_power, d.cpu_voltage,
-               d.gpu_voltage, d.dimm_temps
-    No ctypes structs needed — just mmap + struct.unpack.
+               d.gpu_voltage, d.dimm_temps, d.extra_sensors
     """
     import mmap
     import struct as _struct
@@ -84,8 +86,52 @@ def _hwinfo_read_all(d: "SensorData"):
     except FileNotFoundError:
         return
     except Exception as ex:
-        print(f"[HWiNFO] open failed: {ex}")
+        log.warning("HWiNFO open failed: %s", ex)
         return
+
+    # ── Parse header to get correct offsets ───────────────────────────────────
+    # Header layout (packed):
+    #   uint32 dwSignature
+    #   uint32 dwVersion
+    #   uint32 dwRevision
+    #   int64  poll_time
+    #   uint32 dwOffsetOfSensorSection
+    #   uint32 dwSizeOfSensorElement
+    #   uint32 dwNumSensorElements
+    #   uint32 dwOffsetOfReadingSection
+    #   uint32 dwSizeOfReadingElement
+    #   uint32 dwNumReadingElements
+    HDR_FMT = "<IIIqIIIIII"
+    HDR_SIZE = _struct.calcsize(HDR_FMT)
+    if len(data) < HDR_SIZE:
+        return
+
+    (sig, _ver, _rev, _poll,
+     _off_sensor, _sz_sensor, _n_sensor,
+     off_reading, sz_reading, n_reading) = _struct.unpack_from(HDR_FMT, data, 0)
+
+    # Validate signature: "HWiS" = 0x53695748
+    if sig != 0x53695748:
+        return
+
+    if sz_reading == 0 or n_reading == 0:
+        return
+
+    # ── Reading element field offsets (HWiNFO v2 — confirmed from hex dump) ────
+    # uint32 dwSensorIndex     @ 0
+    # uint32 dwSensorID        @ 4
+    # uint32 dwReadingID       @ 8
+    # char   szLabelOrig[128]  @ 12
+    # char   szLabelUser[128]  @ 140
+    # char   szUnit[16]        @ 268
+    # double Value             @ 284
+    # double ValueMin          @ 292
+    # double ValueMax          @ 300
+    # double ValueAvg          @ 308
+    OFF_LABEL = 12
+    OFF_USER  = 140
+    OFF_UNIT  = 268
+    OFF_VALUE = 284
 
     fans         = []
     cpu_temp     = 0.0
@@ -93,35 +139,8 @@ def _hwinfo_read_all(d: "SensorData"):
     cpu_volt     = 0.0
     gpu_volt     = 0.0
     dimm_temps   = []
-    seen_dimm    = []
     extra        = []          # extra sensors: (label, value, unit_str)
     extra_labels = set()       # dedup by label
-
-    # ── DIMM temps: exact label search ────────────────────────────────────────
-    dimm_search = b'SPD Hub Temperature'
-    pos = 0
-    while True:
-        idx = data.find(dimm_search, pos)
-        if idx == -1:
-            break
-        if not any(abs(idx - s) < 32 for s in seen_dimm):
-            end = idx + 160 + 8
-            if end <= len(data):
-                val = _struct.unpack_from("<d", data, idx + 160)[0]
-                if 1.0 < val < 120.0:
-                    n = len(dimm_temps) + 1
-                    dimm_temps.append((f"DIMM{n}", round(val, 1)))
-                    seen_dimm.append(idx)
-        pos = idx + 1
-
-    # ── General sensor scan: CPU temp, fans, power, voltages ──────────────────
-    # Labels are null-terminated strings in the raw data.
-    # We search for each known label type directly rather than parsing the struct.
-    # Confirmed offsets from live hex dump:
-    #   label  @ byte 12 in each element (128 bytes)
-    #   unit   @ byte 268 (16 bytes)
-    #   value  @ byte 284 (float64)
-    # We find labels by scanning for null-terminated strings and checking neighbours.
 
     _CPU_PWR  = ("cpu package power", "cpu ppt", "cpu power",
                  "package power", "cpu socket power", "cpu total power")
@@ -130,29 +149,38 @@ def _hwinfo_read_all(d: "SensorData"):
     _GPU_VOLT = ("gpu core voltage", "gpu voltage", "gpu vcore",
                  "gpu vid", "gpu core volt")
 
-    i = 0
-    stride = 460   # confirmed element size
-    while i < len(data) - stride:
-        # Read label at offset 12 within element
-        label_raw = data[i+12 : i+140]
-        label     = label_raw.split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+    for i in range(n_reading):
+        base = off_reading + i * sz_reading
+
+        # Bounds check
+        if base + OFF_VALUE + 8 > len(data):
+            break
+
+        # Read label (user-renamed label takes priority, fall back to original)
+        label_user = data[base + OFF_USER : base + OFF_USER + 128].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+        label_orig = data[base + OFF_LABEL : base + OFF_LABEL + 128].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+        label = label_user if label_user else label_orig
         if not label:
-            i += 4
+            continue
+
+        unit = data[base + OFF_UNIT : base + OFF_UNIT + 16].split(b'\x00')[0].decode("latin-1", errors="ignore").strip().lower()
+        try:
+            val = _struct.unpack_from("<d", data, base + OFF_VALUE)[0]
+        except Exception:
             continue
 
         label_l = label.lower()
-        unit    = data[i+268 : i+284].split(b'\x00')[0].decode("latin-1", errors="ignore").strip().lower()
-        try:
-            val = _struct.unpack_from("<d", data, i + 284)[0]
-        except Exception:
-            i += 4
-            continue
 
-        # CPU temperature — first match wins; everything else that's a valid
-        # temp and isn't GPU or DIMM goes to extra_sensors.
+        # CPU temperature — first match wins
         if unit in ("", "c", "\xb0c", "°c") and 0 < val < 150:
             if cpu_temp == 0.0 and any(k in label_l for k in _CPU_TEMP_LABELS):
                 cpu_temp = val
+            elif "spd hub" in label_l or "dimm" in label_l:
+                # DIMM temperatures
+                if label not in extra_labels:
+                    n = len(dimm_temps) + 1
+                    dimm_temps.append((f"DIMM{n}", round(val, 1)))
+                    extra_labels.add(label)
             elif (label not in extra_labels
                   and any(k in label_l for k in _WC_LABELS)):
                 extra.append((label, round(val, 1), "°C"))
@@ -182,8 +210,6 @@ def _hwinfo_read_all(d: "SensorData"):
                 extra.append((label, round(val, 2), unit.upper()))
                 extra_labels.add(label)
 
-        i += stride   # jump a full element at a time
-
     # ── Write results ──────────────────────────────────────────────────────────
     if cpu_temp  > 0: d.cpu_temp   = cpu_temp
     if cpu_power > 0: d.cpu_power  = cpu_power
@@ -193,6 +219,17 @@ def _hwinfo_read_all(d: "SensorData"):
     d.extra_sensors = extra
     fans.sort(key=lambda x: x[0].lower())
     d.fans = fans
+
+    # Log first successful read so user logs show what was detected
+    global _hwinfo_logged_once
+    if not _hwinfo_logged_once:
+        _hwinfo_logged_once = True
+        log.info("HWiNFO first read: cpu_temp=%.1f  cpu_power=%.1f  fans=%d  dimm=%d  extra=%d",
+                 cpu_temp, cpu_power, len(fans), len(dimm_temps), len(extra))
+        if fans:
+            log.info("HWiNFO fans: %s", ", ".join(f"{n}={rpm:.0f}" for n, rpm in fans))
+
+_hwinfo_logged_once = False
 
 # ── NVML ─────────────────────────────────────────────────────────────────────
 try:
@@ -237,10 +274,10 @@ def _try_init_lhm():
 
         dll_path = next((p for p in candidates if os.path.exists(p)), None)
         if dll_path is None:
-            print("[LHM] DLL not found — CPU temp will use WMI fallback")
+            log.info("LHM DLL not found -- CPU temp will use WMI fallback")
             return
 
-        print(f"[LHM] Loading: {dll_path}")
+        log.info("LHM loading: %s", dll_path)
         clr.AddReference(dll_path)
         from LibreHardwareMonitor.Hardware import (  # type: ignore
             Computer, IVisitor
@@ -279,12 +316,10 @@ def _try_init_lhm():
 
         _lhm_computer = comp
         _LHM_OK       = True
-        print(f"[LHM] Initialised OK  "
-              f"(GPU={comp.IsGpuEnabled}  "
-              f"Mobo={comp.IsMotherboardEnabled}  "
-              f"Controller={comp.IsControllerEnabled})")
+        log.info("LHM initialised OK (GPU=%s  Mobo=%s  Controller=%s)",
+                 comp.IsGpuEnabled, comp.IsMotherboardEnabled, comp.IsControllerEnabled)
     except Exception as ex:
-        print(f"[LHM] Init failed: {ex}")
+        log.warning("LHM init failed: %s", ex)
 
 _try_init_lhm()
 
@@ -302,9 +337,9 @@ def _try_init_wmi():
         # Probe once to check it works
         _ = _wmi_obj.MSAcpi_ThermalZoneTemperature()
         _WMI_OK = True
-        print("[WMI] Thermal zone fallback ready")
+        log.info("WMI thermal zone fallback ready")
     except Exception as ex:
-        print(f"[WMI] Not available: {ex}")
+        log.info("WMI not available: %s", ex)
 
 _try_init_wmi()
 
@@ -461,7 +496,7 @@ def _detect_hardware() -> HardwareProfile:
             prof.cpu_temp_crit = 95.0
 
     except Exception as ex:
-        print(f"[Profile] CPU detect error: {ex}")
+        log.error("CPU detect error: %s", ex)
 
     # ── GPU ──────────────────────────────────────────────────────────────────
     if _NVML_OK:
@@ -508,7 +543,7 @@ def _detect_hardware() -> HardwareProfile:
                     pass
 
         except Exception as ex:
-            print(f"[Profile] GPU detect error: {ex}")
+            log.error("GPU detect error: %s", ex)
 
     # ── Non-NVIDIA GPU: detect via WMI Win32_VideoController ─────────────────
     if not _NVML_OK:
@@ -548,16 +583,16 @@ def _detect_hardware() -> HardwareProfile:
                     pass
                 prof.gpu_temp_warn = 85.0
                 prof.gpu_temp_crit = 95.0
-                print(f"[Profile] Non-NVIDIA GPU detected via WMI: {prof.gpu_name}")
+                log.info("Non-NVIDIA GPU detected via WMI: %s", prof.gpu_name)
                 break
         except Exception as ex:
-            print(f"[Profile] WMI GPU detect error: {ex}")
+            log.error("WMI GPU detect error: %s", ex)
 
     # Fan RPM colour threshold: reasonable for most systems
     prof.fan_max_rpm = 3000
 
-    print(f"[Profile] CPU: {prof.cpu_name} | {prof.cpu_cores}c/{prof.cpu_threads}t | TDP {prof.cpu_tdp}W")
-    print(f"[Profile] GPU: {prof.gpu_name} | TDP {prof.gpu_tdp}W | VRAM {prof.gpu_mem_total/1024:.0f}GB")
+    log.info("CPU: %s | %dc/%dt | TDP %.0fW", prof.cpu_name, prof.cpu_cores, prof.cpu_threads, prof.cpu_tdp)
+    log.info("GPU: %s | TDP %.0fW | VRAM %.0fGB", prof.gpu_name, prof.gpu_tdp, prof.gpu_mem_total / 1024)
     return prof
 
 
@@ -590,7 +625,7 @@ class HardwareMonitor:
                         d.extra_sensors.append(entry)
                         existing.add(entry[0])
             except Exception as ex:
-                print(f"[LHM extra] {ex}")
+                log.debug("LHM extra read: %s", ex)
         return d
 
     # ── CPU ───────────────────────────────────────────────────────────────────
@@ -627,7 +662,7 @@ class HardwareMonitor:
                     d.cpu_ccd_temp = ccd
                     return
             except Exception as ex:
-                print(f"[LHM] read error: {ex}")
+                log.debug("LHM CPU read error: %s", ex)
 
         # Temp — METHOD 3: WMI thermal zone
         if _WMI_OK and _wmi_obj:
@@ -641,7 +676,7 @@ class HardwareMonitor:
                         d.cpu_temp = max(valid)
                         return
             except Exception as ex:
-                print(f"[WMI] read error: {ex}")
+                log.debug("WMI CPU read error: %s", ex)
 
         # Temp — METHOD 4: psutil sensors
         try:
@@ -676,7 +711,7 @@ class HardwareMonitor:
                     d.gpu_core_clk  = core_mhz
                     d.gpu_mem_clk   = mem_mhz
             except Exception as ex:
-                print(f"[LHM GPU] read error: {ex}")
+                log.debug("LHM GPU read error: %s", ex)
 
     def _read_gpu_nvml(self, d: SensorData):
         try:
@@ -707,7 +742,7 @@ class HardwareMonitor:
                 except Exception:
                     d.gpu_fan_rpm = 0.0
         except Exception as ex:
-            print(f"[NVML] read error: {ex}")
+            log.debug("NVML read error: %s", ex)
 
 
     # ── Network ───────────────────────────────────────────────────────────────
@@ -832,7 +867,7 @@ class HardwareMonitor:
             self._last_disk_time = now
             d.disk_io = result
         except Exception as ex:
-            print(f"[disk_io] {ex}")
+            log.debug("disk_io error: %s", ex)
 
     # ── FPS ───────────────────────────────────────────────────────────────────
     def _read_fps(self, d: SensorData):
