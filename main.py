@@ -15,7 +15,7 @@ Works on any Windows PC — AMD/Intel CPU, NVIDIA/AMD GPU, any core count.
 
 __author__    = "Josh Stanley"
 __copyright__ = "Copyright (c) 2025 Josh Stanley"
-__version__   = "1.0.0"
+__version__   = "1.1.0"
 
 import sys
 import os
@@ -127,6 +127,8 @@ os.makedirs(_APP_DATA, exist_ok=True)
 # ── Settings file ─────────────────────────────────────────────────────────────
 SETTINGS_PATH = os.path.join(_APP_DATA, "settings.ini")
 
+_DEFAULT_LAYOUT_STR = "cpu_temp,cpu_load,gpu_temp,gpu_load,fps,ram,net_ssd"
+
 def load_settings():
     cfg = configparser.ConfigParser()
     cfg.read(SETTINGS_PATH)
@@ -136,6 +138,8 @@ def load_settings():
         "width":    cfg.getint("window", "width",  fallback=1920),
         "height":   cfg.getint("window", "height", fallback=1080),
         "theme":    cfg.get("window", "theme",    fallback="dark"),
+        "accent":   cfg.get("window", "accent",   fallback="blue"),
+        "layout":   cfg.get("window", "layout",   fallback=_DEFAULT_LAYOUT_STR),
     }
 
 def save_settings(s):
@@ -146,6 +150,8 @@ def save_settings(s):
         "width":   str(s["width"]),
         "height":  str(s["height"]),
         "theme":   str(s.get("theme", "dark")),
+        "accent":  str(s.get("accent", "blue")),
+        "layout":  str(s.get("layout", _DEFAULT_LAYOUT_STR)),
     }
     with open(SETTINGS_PATH, "w") as f:
         cfg.write(f)
@@ -327,6 +333,54 @@ FONT_LBL = "Segoe UI"
 
 NET_POINTS = 40   # was 60 — 40 points at 1s = 40s history, saves ~33%
 IO_POINTS  = 40
+
+# ── Accent color presets ─────────────────────────────────────────────────────
+ACCENT_PRESETS = {
+    "blue":   (60, 140, 255),
+    "purple": (160, 80, 255),
+    "teal":   (0, 200, 180),
+    "orange": (255, 140, 40),
+    "red":    (255, 70, 70),
+    "cyan":   (0, 190, 230),
+    "pink":   (255, 80, 160),
+    "yellow": (240, 200, 40),
+}
+
+_accent_name = "blue"
+
+def _apply_accent(name):
+    """Set the accent colour in both themes and rebuild paint caches."""
+    global _accent_name
+    _accent_name = name
+    r, g, b = ACCENT_PRESETS.get(name, ACCENT_PRESETS["blue"])
+    THEMES["dark"]["blue"]  = QColor(r, g, b)
+    THEMES["light"]["blue"] = QColor(max(0, r - 30), max(0, g - 40), max(0, b - 20))
+    _PC.rebuild()
+    _FC.clear()
+
+# ── Panel swap system ────────────────────────────────────────────────────────
+PANEL_CHOICES = [
+    ("cpu_temp", "CPU Temperature"),
+    ("cpu_load", "CPU Load"),
+    ("gpu_temp", "GPU Temperature"),
+    ("gpu_load", "GPU Load"),
+    ("fps",      "FPS Counter"),
+    ("ram",      "RAM Usage"),
+    ("network",  "Network"),
+    ("disk_io",  "Disk I/O"),
+    ("net_ssd",  "Network + Disk I/O"),
+]
+
+# Grid positions for 7 slots: (row, col, rowspan, colspan)
+SLOT_GRID = [
+    (0, 0, 1, 1),   # slot 0
+    (0, 1, 1, 1),   # slot 1
+    (0, 2, 1, 1),   # slot 2
+    (0, 3, 1, 1),   # slot 3
+    (0, 4, 1, 1),   # slot 4
+    (1, 0, 1, 1),   # slot 5
+    (1, 1, 1, 4),   # slot 6 (wide)
+]
 
 # Fan rename persistence
 FAN_NAMES_PATH = os.path.join(_APP_DATA, "fan_names.ini")
@@ -700,18 +754,22 @@ class TitleBar(QWidget):
         self._on_close      = on_close
         self._drag_pos      = None
         self._hovered       = None   # "settings" | "fs" | "min" | "close"
-        self.setFixedHeight(34)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(28)
+        self.setMaximumHeight(48)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
 
     # ── Button rects (computed each paint) ───────────────────────────────────
     def _btn_rects(self):
-        bw, bh = 32, 24
-        y  = (self.height() - bh) // 2
+        h  = self.height()
+        bw = max(28, int(h * 0.85))
+        bh = max(20, int(h * 0.70))
+        y  = (h - bh) // 2
+        gap = max(3, int(bw * 0.12))
         x4 = self.width() - bw - 6
-        x3 = x4 - bw - 4
-        x2 = x3 - bw - 4
-        x1 = x2 - bw - 4
+        x3 = x4 - bw - gap
+        x2 = x3 - bw - gap
+        x1 = x2 - bw - gap
         return {
             "settings": QRect(x1, y, bw, bh),
             "fs":       QRect(x2, y, bw, bh),
@@ -731,12 +789,13 @@ class TitleBar(QWidget):
         p.setPen(QPen(_t("border"), 1))
         p.drawLine(0, h - 1, w, h - 1)
 
-        # Title with detected hardware
+        # Title with detected hardware — scales with bar height
+        title_sz = max(7, int(h * 0.30))
         cpu_short = _shorten_cpu(HW_PROFILE.cpu_name)
         gpu_short = _shorten_gpu(HW_PROFILE.gpu_name)
         title_str = f"COMMAND CENTER  ·  {cpu_short}  ·  {gpu_short}"
         p.setPen(QPen(_t("dim")))
-        p.setFont(F(FONT_LBL, 9, True))
+        p.setFont(F(FONT_LBL, title_sz, True))
         p.drawText(QRect(14, 0, int(w * 0.75), h),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                    title_str)
@@ -746,13 +805,14 @@ class TitleBar(QWidget):
         btn_left  = min(r.left() for r in rects_tmp.values()) - 8
         author_c  = QColor(_t("dim")); author_c.setAlpha(120)
         p.setPen(QPen(author_c))
-        p.setFont(F(FONT_LBL, 8))
+        p.setFont(F(FONT_LBL, max(6, int(h * 0.24))))
         p.drawText(QRect(int(w * 0.50), 0, btn_left - int(w * 0.50), h),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    "© 2025 Josh Stanley")
 
         # Buttons
         rects = self._btn_rects()
+        icon_sz = max(8, int(h * 0.34))
         icons = {"settings": "⚙", "fs": "⛶", "min": "—", "close": "✕"}
         for key, rect in rects.items():
             # Hover bg
@@ -764,7 +824,7 @@ class TitleBar(QWidget):
 
             icon_c = QColor(220, 60, 60) if (key == "close" and self._hovered == "close") else _t("dim")
             p.setPen(QPen(icon_c))
-            p.setFont(F(FONT_LBL, 11))
+            p.setFont(F(FONT_LBL, icon_sz))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, icons[key])
 
         p.end()
@@ -852,6 +912,21 @@ class SettingsDialog(QDialog):
         self._theme_cb.setCurrentIndex(0 if _theme_name == "dark" else 1)
         layout.addRow("Theme:", self._theme_cb)
 
+        # Accent colour
+        self._accent_cb = QComboBox()
+        _accent_labels = {
+            "blue": "🔵  Blue", "purple": "🟣  Purple", "teal": "🟢  Teal",
+            "orange": "🟠  Orange", "red": "🔴  Red", "cyan": "🔵  Cyan",
+            "pink": "🩷  Pink", "yellow": "🟡  Yellow",
+        }
+        for key in ACCENT_PRESETS:
+            self._accent_cb.addItem(_accent_labels.get(key, key.title()), key)
+        cur_accent = settings.get("accent", _accent_name)
+        accent_keys = list(ACCENT_PRESETS.keys())
+        self._accent_cb.setCurrentIndex(
+            accent_keys.index(cur_accent) if cur_accent in accent_keys else 0)
+        layout.addRow("Accent:", self._accent_cb)
+
         # Startup checkbox
         self._startup_cb = QCheckBox("Launch Command Center on Windows startup")
         self._startup_cb.setChecked(get_startup())
@@ -860,7 +935,7 @@ class SettingsDialog(QDialog):
         # About row
         about_lbl = QLabel(
             "<span style='font-size:10px;'>"
-            "<b>Command Center</b> v1.0 &nbsp;·&nbsp; "
+            "<b>Command Center</b> v1.1 &nbsp;·&nbsp; "
             "© 2025 <b>Josh Stanley</b> &nbsp;·&nbsp; All rights reserved."
             "</span>"
         )
@@ -880,6 +955,7 @@ class SettingsDialog(QDialog):
             "monitor": self._monitor_cb.currentData(),
             "startup": self._startup_cb.isChecked(),
             "theme":   self._theme_cb.currentData(),
+            "accent":  self._accent_cb.currentData(),
         }
 
 
@@ -887,16 +963,43 @@ class SettingsDialog(QDialog):
 #  CARD — dark rounded tile, fully scalable
 # ══════════════════════════════════════════════════════════════════════════════
 class Card(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, slot_id=None, on_swap=None, parent=None):
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(12, 12, 12, 12)
         self._layout.setSpacing(4)
+        self._slot_id = slot_id
+        self._on_swap = on_swap
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
 
     def add(self, w, stretch=0):
         self._layout.addWidget(w, stretch)
+
+    def clear(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+
+    def contextMenuEvent(self, event):
+        if self._slot_id is None or self._on_swap is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #2a2a36; color: #dde0f0; border: 1px solid #444; }"
+            "QMenu::item:selected { background: #3c8cff; }"
+            if _theme_name == "dark" else
+            "QMenu { background: #f0f0f6; color: #1e1e2e; border: 1px solid #ccc; }"
+            "QMenu::item:selected { background: #3c8cff; color: white; }"
+        )
+        for pid, name in PANEL_CHOICES:
+            action = menu.addAction(name)
+            action.setData(pid)
+        chosen = menu.exec(event.globalPos())
+        if chosen:
+            self._on_swap(self._slot_id, chosen.data())
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1546,14 +1649,16 @@ class CommandCenter(QMainWindow):
         self._drag_pos  = None
         self._settings  = load_settings()
 
-        # Apply saved theme before building UI
+        # Apply saved theme + accent before building UI
         global _theme_name
         _theme_name = self._settings.get("theme", "dark")
+        _apply_accent(self._settings.get("accent", "blue"))
 
         self.setWindowTitle("COMMAND CENTER")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool   # hide from taskbar — tray icon is the entry point
         )
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -1681,23 +1786,7 @@ class CommandCenter(QMainWindow):
         outer.setContentsMargins(16, 12, 16, 16)
         outer.setSpacing(12)
 
-        # ── Main grid ────────────────────────────────────────────────────────
-        main_widget = QWidget()
-        grid = QGridLayout(main_widget)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(12)
-
-        # 5 columns: CPU TEMP | CPU LOAD | GPU TEMP | GPU LOAD | FPS
-        for c in range(5):
-            grid.setColumnStretch(c, 1)
-        # 3 rows: gauges | RAM + Net+SSD (span 4 cols)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-
-        def wrap(w):
-            c = Card(); c.add(w, 1); return c
-
-        # Row 0 — all gauges with their strips
+        # ── Create ALL sensor widgets (always available regardless of layout) ─
         self._cpu_temp        = Gauge("CPU TEMP", "°C", 110,
                                       HW_PROFILE.cpu_temp_warn, HW_PROFILE.cpu_temp_crit)
         self._cpu_load        = Gauge("CPU LOAD", "%",  100, 75, 90)
@@ -1705,54 +1794,43 @@ class CommandCenter(QMainWindow):
                                       HW_PROFILE.gpu_temp_warn, HW_PROFILE.gpu_temp_crit)
         self._gpu_load        = Gauge("GPU LOAD", "%",  100, 80, 95)
         self._fps             = FpsDisplay()
-        self._strip_cpu_info  = StatsStrip(StatsStrip.MODE_CPU_INFO)   # under CPU TEMP
-        self._strip_cpu_cores = StatsStrip(StatsStrip.MODE_CPU_CORES)  # under CPU LOAD
-        self._strip_gpu_info  = StatsStrip(StatsStrip.MODE_GPU_INFO)   # under GPU TEMP
-        self._strip_gpu_mem   = StatsStrip(StatsStrip.MODE_GPU_MEM)    # under GPU LOAD
+        self._strip_cpu_info  = StatsStrip(StatsStrip.MODE_CPU_INFO)
+        self._strip_cpu_cores = StatsStrip(StatsStrip.MODE_CPU_CORES)
+        self._strip_gpu_info  = StatsStrip(StatsStrip.MODE_GPU_INFO)
+        self._strip_gpu_mem   = StatsStrip(StatsStrip.MODE_GPU_MEM)
+        self._ram_load        = Gauge("RAM LOAD", "%", 100, 75, 90)
+        self._ram_info        = RamInfoStrip()
+        self._net             = NetGraph()
+        self._ssd             = SsdPanel()
 
-        def wrap_strip(gauge, strip):
-            c = Card()
-            c.add(gauge, 1)
-            c.add(strip, 0)
-            return c
+        # ── Main grid — populated from layout config ─────────────────────────
+        main_widget = QWidget()
+        self._grid = QGridLayout(main_widget)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(12)
+        for c in range(5):
+            self._grid.setColumnStretch(c, 1)
+        self._grid.setRowStretch(0, 1)
+        self._grid.setRowStretch(1, 1)
 
-        grid.addWidget(wrap_strip(self._cpu_temp, self._strip_cpu_info),   0, 0)
-        grid.addWidget(wrap_strip(self._cpu_load, self._strip_cpu_cores),  0, 1)
-        grid.addWidget(wrap_strip(self._gpu_temp, self._strip_gpu_info),   0, 2)
-        grid.addWidget(wrap_strip(self._gpu_load, self._strip_gpu_mem),    0, 3)
-        grid.addWidget(wrap(self._fps),                                    0, 4)
+        # Parse layout from settings
+        layout_str = self._settings.get("layout", _DEFAULT_LAYOUT_STR)
+        self._current_layout = layout_str.split(",")
+        # Ensure exactly 7 slots
+        while len(self._current_layout) < 7:
+            defaults = _DEFAULT_LAYOUT_STR.split(",")
+            self._current_layout.append(defaults[len(self._current_layout) % len(defaults)])
+        self._current_layout = self._current_layout[:7]
 
-        # Row 1 — RAM gauge | Network+SSD (span 3 cols) | Disk panel (span 1)
-        self._ram_load    = Gauge("RAM LOAD", "%", 100, 75, 90)
-        self._ram_info    = RamInfoStrip()
-        ram_card = Card()
-        ram_card.add(self._ram_load, 1)
-        ram_card.add(self._ram_info, 0)
-        grid.addWidget(ram_card, 1, 0)
-        self._net      = NetGraph()
-        self._ssd      = SsdPanel()
+        # Create cards for each slot
+        self._slot_cards = []
+        for i, panel_id in enumerate(self._current_layout):
+            card = self._create_panel_card(panel_id, i)
+            row, col, rspan, cspan = SLOT_GRID[i]
+            self._grid.addWidget(card, row, col, rspan, cspan)
+            self._slot_cards.append(card)
 
-        # Network and SSD sit side by side inside one card spanning 3 cols
-        net_ssd_card = Card()
-        ns_layout = QHBoxLayout()
-        ns_layout.setContentsMargins(0, 0, 0, 0)
-        ns_layout.setSpacing(10)
-        ns_layout.addWidget(self._net, stretch=1)
-
-        # Divider line
-        div = QWidget(); div.setFixedWidth(1)
-        div.setStyleSheet("background: rgba(0,0,0,0.12);" if _theme_name == "light" else "background: rgba(255,255,255,0.08);")
-        ns_layout.addWidget(div)
-
-        ns_layout.addWidget(self._ssd, stretch=1)
-        inner = QWidget()
-        inner.setLayout(ns_layout)
-        net_ssd_card.add(inner, 1)
-
-        # ram_card already added above
-        grid.addWidget(net_ssd_card,         1, 1, 1, 4)   # spans cols 1-4
-
-        # ── Right column: Fan panel + Extra Sensors (auto-shown when detected) ──
+        # ── Right column: Fan panel + Extra Sensors ──────────────────────────
         self._fan_panel   = FanPanel()
         self._extra_panel = ExtraSensorsPanel()
 
@@ -1769,6 +1847,94 @@ class CommandCenter(QMainWindow):
 
         outer.addWidget(main_widget, stretch=5)
         outer.addWidget(right_col,   stretch=1)
+
+    # ── Panel factory ────────────────────────────────────────────────────────
+    def _create_panel_card(self, panel_id, slot_idx):
+        """Create a Card populated with the right widget(s) for panel_id."""
+        card = Card(slot_id=slot_idx, on_swap=self._swap_slot)
+
+        if panel_id == "cpu_temp":
+            card.add(self._cpu_temp, 1)
+            card.add(self._strip_cpu_info, 0)
+        elif panel_id == "cpu_load":
+            card.add(self._cpu_load, 1)
+            card.add(self._strip_cpu_cores, 0)
+        elif panel_id == "gpu_temp":
+            card.add(self._gpu_temp, 1)
+            card.add(self._strip_gpu_info, 0)
+        elif panel_id == "gpu_load":
+            card.add(self._gpu_load, 1)
+            card.add(self._strip_gpu_mem, 0)
+        elif panel_id == "fps":
+            card.add(self._fps, 1)
+        elif panel_id == "ram":
+            card.add(self._ram_load, 1)
+            card.add(self._ram_info, 0)
+        elif panel_id == "network":
+            card.add(self._net, 1)
+        elif panel_id == "disk_io":
+            card.add(self._ssd, 1)
+        elif panel_id == "net_ssd":
+            ns_w = QWidget()
+            ns_l = QHBoxLayout(ns_w)
+            ns_l.setContentsMargins(0, 0, 0, 0)
+            ns_l.setSpacing(10)
+            ns_l.addWidget(self._net, stretch=1)
+            div = QWidget(); div.setFixedWidth(1)
+            div.setStyleSheet(
+                "background: rgba(0,0,0,0.12);" if _theme_name == "light"
+                else "background: rgba(255,255,255,0.08);")
+            ns_l.addWidget(div)
+            ns_l.addWidget(self._ssd, stretch=1)
+            card.add(ns_w, 1)
+
+        return card
+
+    # ── Panel swap ───────────────────────────────────────────────────────────
+    def _swap_slot(self, slot_idx, new_panel_id):
+        """Swap panel in slot_idx to new_panel_id. If new_panel_id is already
+        placed elsewhere, the two slots swap their panels."""
+        layout = self._current_layout
+        old_panel_id = layout[slot_idx]
+        if old_panel_id == new_panel_id:
+            return
+
+        # Update layout
+        if new_panel_id in layout:
+            other_idx = layout.index(new_panel_id)
+            layout[other_idx] = old_panel_id
+        layout[slot_idx] = new_panel_id
+
+        # Rebuild entire grid — detach all widgets, destroy all cards, recreate
+        self._rebuild_all_slots()
+
+        # Persist
+        self._settings["layout"] = ",".join(layout)
+        save_settings(self._settings)
+
+    def _rebuild_all_slots(self):
+        """Tear down and recreate all 7 slot cards."""
+        # Detach all sensor widgets from their current parents
+        for w in (self._cpu_temp, self._cpu_load, self._gpu_temp, self._gpu_load,
+                  self._fps, self._ram_load, self._ram_info, self._net, self._ssd,
+                  self._strip_cpu_info, self._strip_cpu_cores,
+                  self._strip_gpu_info, self._strip_gpu_mem):
+            w.setParent(None)
+
+        # Remove old cards from grid
+        for card in self._slot_cards:
+            self._grid.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+
+        # Recreate all cards
+        self._slot_cards = []
+        for i, panel_id in enumerate(self._current_layout):
+            card = self._create_panel_card(panel_id, i)
+            row, col, rspan, cspan = SLOT_GRID[i]
+            self._grid.addWidget(card, row, col, rspan, cspan)
+            self._slot_cards.append(card)
+            card.show()
 
     # ── Poll hardware ─────────────────────────────────────────────────────────
     def _reader_loop(self):
@@ -1845,16 +2011,19 @@ class CommandCenter(QMainWindow):
             self._settings["monitor"] = vals["monitor"]
             self._settings["startup"] = vals["startup"]
             self._settings["theme"]   = vals["theme"]
+            self._settings["accent"]  = vals["accent"]
             save_settings(self._settings)
             set_startup(vals["startup"])
-            self._apply_theme(vals["theme"])
+            self._apply_theme(vals["theme"], vals["accent"])
             self._apply_monitor()
 
-    def _apply_theme(self, theme_name: str):
+    def _apply_theme(self, theme_name: str, accent_name: str = None):
         global _theme_name
         _theme_name = theme_name
-        _PC.rebuild()   # rebuild cached QPen/QBrush for new theme
-        _FC.clear()     # clear font cache (sizes may differ between themes)
+        if accent_name:
+            _apply_accent(accent_name)
+        _PC.rebuild()
+        _FC.clear()
         self.update()
         for w in self.findChildren(QWidget):
             w.update()

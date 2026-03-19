@@ -175,12 +175,13 @@ def _hwinfo_read_all(d: "SensorData"):
         if unit in ("", "c", "\xb0c", "°c") and 0 < val < 150:
             if cpu_temp == 0.0 and any(k in label_l for k in _CPU_TEMP_LABELS):
                 cpu_temp = val
-            elif "spd hub" in label_l or "dimm" in label_l:
-                # DIMM temperatures
-                if label not in extra_labels:
-                    n = len(dimm_temps) + 1
-                    dimm_temps.append((f"DIMM{n}", round(val, 1)))
-                    extra_labels.add(label)
+            elif any(k in label_l for k in ("spd hub", "dimm", "sodimm",
+                                                   "memory temp", "ram temp",
+                                                   "tsensor_mem", "ts0_temp", "ts1_temp")):
+                # DIMM / memory stick temperatures — NO dedup, same label
+                # can appear for each stick (e.g. two "SPD Hub Temperature")
+                n = len(dimm_temps) + 1
+                dimm_temps.append((f"DIMM {n}", round(val, 1)))
             elif (label not in extra_labels
                   and any(k in label_l for k in _WC_LABELS)):
                 extra.append((label, round(val, 1), "°C"))
@@ -228,6 +229,8 @@ def _hwinfo_read_all(d: "SensorData"):
                  cpu_temp, cpu_power, len(fans), len(dimm_temps), len(extra))
         if fans:
             log.info("HWiNFO fans: %s", ", ".join(f"{n}={rpm:.0f}" for n, rpm in fans))
+        if dimm_temps:
+            log.info("HWiNFO DIMMs: %s", ", ".join(f"{lbl}={t:.1f}C" for lbl, t in dimm_temps))
 
 _hwinfo_logged_once = False
 
