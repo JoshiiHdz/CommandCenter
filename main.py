@@ -105,15 +105,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout,
     QVBoxLayout, QHBoxLayout, QLabel, QDialog,
     QComboBox, QCheckBox, QPushButton, QFormLayout,
-    QDialogButtonBox, QMenu, QSizePolicy, QSystemTrayIcon
+    QDialogButtonBox, QMenu, QSizePolicy, QSystemTrayIcon,
+    QScrollArea
 )
-from PyQt6.QtCore import Qt, QTimer, QRectF, QRect, QPointF, QSize
+from PyQt6.QtCore import Qt, QTimer, QRectF, QRect, QPointF, QSize, QPoint, QMimeData
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont,
-    QLinearGradient, QPainterPath, QPalette, QAction, QIcon
+    QLinearGradient, QPainterPath, QPalette, QAction, QIcon, QDrag, QPixmap
 )
 
-from hardware import HardwareMonitor, HW_PROFILE, hwinfo_available
+from hardware import HardwareMonitor, HW_PROFILE, hwinfo_available, get_foreground_fps
 
 log = logging.getLogger(__name__)
 
@@ -127,31 +128,36 @@ os.makedirs(_APP_DATA, exist_ok=True)
 # ── Settings file ─────────────────────────────────────────────────────────────
 SETTINGS_PATH = os.path.join(_APP_DATA, "settings.ini")
 
-_DEFAULT_LAYOUT_STR = "cpu_temp,cpu_load,gpu_temp,gpu_load,fps,ram,net_ssd"
+_DEFAULT_LAYOUT_STR = ("cpu_temp,cpu_load,cpu_power,cpu_freq,"
+                       "gpu_temp,gpu_load,gpu_power,gpu_vram,"
+                       "fps,ram,cpu_voltage,cpu_elec_current,"
+                       "gpu_clock,gpu_voltage,cpu_therm_current,gpu_mem_clk")
 
 def load_settings():
     cfg = configparser.ConfigParser()
     cfg.read(SETTINGS_PATH)
     return {
-        "monitor":  cfg.get("window", "monitor",  fallback="0"),
-        "startup":  cfg.getboolean("window", "startup", fallback=False),
-        "width":    cfg.getint("window", "width",  fallback=1920),
-        "height":   cfg.getint("window", "height", fallback=1080),
-        "theme":    cfg.get("window", "theme",    fallback="dark"),
-        "accent":   cfg.get("window", "accent",   fallback="blue"),
-        "layout":   cfg.get("window", "layout",   fallback=_DEFAULT_LAYOUT_STR),
+        "monitor":      cfg.get("window", "monitor",      fallback="0"),
+        "startup":      cfg.getboolean("window", "startup", fallback=False),
+        "width":        cfg.getint("window", "width",      fallback=1920),
+        "height":       cfg.getint("window", "height",     fallback=1080),
+        "theme":        cfg.get("window", "theme",         fallback="dark"),
+        "accent":       cfg.get("window", "accent",        fallback="blue"),
+        "layout":        cfg.get("window", "layout",        fallback=_DEFAULT_LAYOUT_STR),
+        "hidden_panels": cfg.get("window", "hidden_panels", fallback=""),
     }
 
 def save_settings(s):
     cfg = configparser.ConfigParser()
     cfg["window"] = {
-        "monitor": str(s["monitor"]),
-        "startup": str(s["startup"]),
-        "width":   str(s["width"]),
-        "height":  str(s["height"]),
-        "theme":   str(s.get("theme", "dark")),
-        "accent":  str(s.get("accent", "blue")),
-        "layout":  str(s.get("layout", _DEFAULT_LAYOUT_STR)),
+        "monitor":      str(s["monitor"]),
+        "startup":      str(s["startup"]),
+        "width":        str(s["width"]),
+        "height":       str(s["height"]),
+        "theme":        str(s.get("theme", "dark")),
+        "accent":       str(s.get("accent", "blue")),
+        "layout":        str(s.get("layout", _DEFAULT_LAYOUT_STR)),
+        "hidden_panels": str(s.get("hidden_panels", "")),
     }
     with open(SETTINGS_PATH, "w") as f:
         cfg.write(f)
@@ -371,15 +377,14 @@ PANEL_CHOICES = [
     ("net_ssd",  "Network + Disk I/O"),
 ]
 
-# Grid positions for 7 slots: (row, col, rowspan, colspan)
+# Grid positions for 6 slots: (row, col, rowspan, colspan)
 SLOT_GRID = [
     (0, 0, 1, 1),   # slot 0
     (0, 1, 1, 1),   # slot 1
     (0, 2, 1, 1),   # slot 2
-    (0, 3, 1, 1),   # slot 3
-    (0, 4, 1, 1),   # slot 4
-    (1, 0, 1, 1),   # slot 5
-    (1, 1, 1, 4),   # slot 6 (wide)
+    (1, 0, 1, 1),   # slot 3
+    (1, 1, 1, 1),   # slot 4
+    (1, 2, 1, 1),   # slot 5
 ]
 
 # Fan rename persistence
@@ -565,26 +570,29 @@ class FanPanel(QWidget):
         p.setPen(PEN_BORDER())
         p.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 14, 14)
 
-        pad     = 16
-        title_h = int(h * 0.07)
+        pad     = 12
+        avail_w = w - pad * 2
+        title_sz = min(int(h * 0.036), _fsz(avail_w, 10))  # "FAN SPEEDS" = 10 chars
+        title_sz = max(8, title_sz)
+        title_h  = int(title_sz * 1.6 + 4)
 
         # Title
         p.setPen(PEN_DIM())
-        p.setFont(F(FONT_LBL, max(8, int(h * 0.036))))
-        p.drawText(QRect(pad, 8, w - pad * 2, title_h),
+        p.setFont(F(FONT_LBL, title_sz))
+        p.drawText(QRect(pad, 6, avail_w, title_h),
                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                    "FAN SPEEDS")
 
-        # Hint — smaller, italics feel, clipped to panel width
-        hint_sz = max(5, min(int(h * 0.020), _fsz(w - pad * 2, 24)))
+        # Hint — fits width, "dbl-click row to rename" = 23 chars
+        hint_sz = max(5, min(int(h * 0.018), _fsz(avail_w, 23)))
         p.setFont(F(FONT_LBL, hint_sz))
-        p.drawText(QRect(pad, title_h - 2, w - pad * 2, hint_sz + 6),
+        p.drawText(QRect(pad, title_h + 4, avail_w, hint_sz + 6),
                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                    "dbl-click row to rename")
 
         # Divider
         p.setPen(PEN_BORDER())
-        div_y = title_h + hint_sz + 10
+        div_y = title_h + hint_sz + 12
         p.drawLine(pad, div_y, w - pad, div_y)
 
         if not self._fans:
@@ -605,7 +613,7 @@ class FanPanel(QWidget):
 
         for i, (orig_label, rpm) in enumerate(self._fans):
             ry      = row_area_top + i * row_h
-            bar_w   = w - pad * 2
+            bar_w   = avail_w
             bar_h   = max(5, int(row_h * 0.16))
             # Height cap: 1pt ≈ 1.333px, label rect = 32% of row_h, rpm rect = 30%
             lbl_sz  = max(7, min(int(row_h * 0.20), _fsz(bar_w, 20)))
@@ -739,6 +747,458 @@ class ExtraSensorsPanel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  FOOTER BAR — network + disk sparklines with values
+# ══════════════════════════════════════════════════════════════════════════════
+class FooterBar(QWidget):
+    FOOT_H   = 72
+    _NPTS    = 40
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.FOOT_H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+
+        self._tx_now   = 0.0;  self._rx_now   = 0.0
+        self._ping_ms  = -1.0; self._pkt_loss = 0.0
+        self._tx_hist  = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+        self._rx_hist  = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+        self._net_peak = 1.0
+
+        self._disk_io     = {}
+        self._drive_order = []
+        self._sel_drive   = None
+        self._drive_rect  = QRect()
+        self._dr_hist     = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+        self._dw_hist     = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+        self._disk_peak   = 1.0
+
+    def push_network(self, tx, rx, ping_ms=-1.0, pkt_loss=0.0):
+        self._tx_now = tx; self._rx_now = rx
+        self._ping_ms = ping_ms; self._pkt_loss = pkt_loss
+        self._tx_hist.append(tx); self._rx_hist.append(rx)
+        self._net_peak = max(max(self._tx_hist), max(self._rx_hist), 1.0)
+        self.update()
+
+    def push_disk(self, disk_io: list):
+        for label, rbps, wbps in disk_io:
+            if label not in self._disk_io:
+                self._drive_order.append(label)
+                if self._sel_drive is None:
+                    self._sel_drive = label
+            self._disk_io[label] = {"rn": rbps, "wn": wbps}
+        if self._sel_drive and self._sel_drive in self._disk_io:
+            d = self._disk_io[self._sel_drive]
+            self._dr_hist.append(d["rn"]); self._dw_hist.append(d["wn"])
+            self._disk_peak = max(max(self._dr_hist), max(self._dw_hist), 1.0)
+        self.update()
+
+    def mousePressEvent(self, e):
+        if (e.button() == Qt.MouseButton.LeftButton and
+                self._drive_rect.contains(e.position().toPoint()) and
+                len(self._drive_order) > 1):
+            self._show_drive_menu()
+
+    def _show_drive_menu(self):
+        menu = QMenu(self)
+        is_dark = _theme_name == "dark"
+        menu.setStyleSheet(
+            "QMenu{background:#2a2a36;color:#dde0f0;border:1px solid #444;padding:4px;}"
+            "QMenu::item{padding:5px 18px;}"
+            "QMenu::item:selected{background:#3c8cff;}"
+            if is_dark else
+            "QMenu{background:#f0f0f6;color:#1e1e2e;border:1px solid #ccc;padding:4px;}"
+            "QMenu::item{padding:5px 18px;}"
+            "QMenu::item:selected{background:#3c8cff;color:white;}"
+        )
+        for label in self._drive_order:
+            a = menu.addAction(label); a.setData(label)
+        chosen = menu.exec(self.mapToGlobal(self._drive_rect.bottomLeft()))
+        if chosen:
+            self._sel_drive = chosen.data()
+            self._dr_hist  = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+            self._dw_hist  = collections.deque([0.0] * self._NPTS, maxlen=self._NPTS)
+            self._disk_peak = 1.0
+            self.update()
+
+    def _draw_sparkline(self, p, hist, peak, color, fill_alpha,
+                        gx, gy, gw, gh):
+        pts  = list(hist)
+        n    = len(pts)
+        path = QPainterPath()
+        for i, v in enumerate(pts):
+            x = gx + gw * i / max(n - 1, 1)
+            y = gy + gh - gh * (v / peak) * 0.92
+            if i == 0: path.moveTo(x, y)
+            else:       path.lineTo(x, y)
+        fill = QPainterPath(path)
+        fill.lineTo(gx + gw, gy + gh); fill.lineTo(gx, gy + gh); fill.closeSubpath()
+        fc = QColor(color); fc.setAlpha(fill_alpha)
+        p.setBrush(QBrush(fc)); p.setPen(Qt.PenStyle.NoPen); p.drawPath(fill)
+        p.setBrush(Qt.BrushStyle.NoBrush); p.setPen(QPen(color, 1.2)); p.drawPath(path)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        bg = QColor(16, 16, 22) if _theme_name == "dark" else QColor(208, 210, 222)
+        p.fillRect(0, 0, w, h, bg)
+        p.setPen(QPen(_t("border"), 1)); p.drawLine(0, 0, w, 0)
+
+        pad   = 10
+        vsz   = max(8, int(h * 0.23))    # value font
+        lsz   = max(6, int(h * 0.17))    # label font
+        half  = w // 2
+        row_h = h // 2                   # each value row height
+
+        # Sparkline area — full height, minus top/bottom padding
+        gy  = 5
+        gh  = h - 10
+
+        # Fixed column widths — val_w tied to font size, not window width
+        lbl_w = 40                        # "NET" / "C:▾"
+        val_w = max(90, int(vsz * 8.0))  # "▲ 100.0 MB/s" — wide enough for full string
+
+        # ── NET half ──────────────────────────────────────────────
+        val_x  = pad + lbl_w + 6
+        gx_n   = val_x + val_w + 6
+        max_gw = max(120, min(260, int(w * 0.16)))
+        gw_n   = min(half - gx_n - pad, max_gw)
+
+        # "NET" label — vertically centred
+        p.setPen(PEN_DIM()); p.setFont(F(FONT_LBL, lsz, True))
+        p.drawText(QRect(pad, 0, lbl_w, h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "NET")
+
+        # TX / RX values — vertically centred pair
+        p.setPen(PEN_GREEN()); p.setFont(F(FONT_NUM, vsz, True))
+        p.drawText(QRect(val_x, 1, val_w, row_h + 1),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                   f"▲ {_fmt(self._tx_now)}")
+        p.setPen(PEN_BLUE())
+        p.drawText(QRect(val_x, row_h - 1, val_w, row_h + 1),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                   f"▼ {_fmt(self._rx_now)}")
+
+        # Sparkline — right of values, full height
+        if gw_n > 10:
+            p.setBrush(BRUSH_TRACK()); p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(QRectF(gx_n, gy, gw_n, gh), 4, 4)
+            self._draw_sparkline(p, self._rx_hist, self._net_peak,
+                                 C_BLUE(), 25, gx_n, gy, gw_n, gh)
+            self._draw_sparkline(p, self._tx_hist, self._net_peak,
+                                 C_GREEN(), 25, gx_n, gy, gw_n, gh)
+
+        # ── Separator ──
+        p.setPen(QPen(_t("border"), 1)); p.drawLine(half, 6, half, h - 6)
+
+        # ── DISK half ─────────────────────────────────────────────
+        dx     = half + pad
+        dlbl_w = max(56, int(vsz * 5.0))   # wider to fit "C: ▾" without overlap
+        val_dx = dx + dlbl_w + 4
+        gx_d  = val_dx + val_w + 6
+        gw_d  = min(w - gx_d - pad, max_gw)
+
+        if self._sel_drive and self._sel_drive in self._disk_io:
+            d     = self._disk_io[self._sel_drive]
+            multi = len(self._drive_order) > 1
+            dr_str = self._sel_drive + ("  ▾" if multi else "")
+            self._drive_rect = QRect(dx, 0, dlbl_w, h)
+
+            if multi:
+                hov = QColor(_t("blue")); hov.setAlpha(25)
+                p.setBrush(QBrush(hov)); p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRectF(dx - 3, 3, dlbl_w + 2, h - 6), 4, 4)
+
+            p.setPen(PEN_DIM()); p.setFont(F(FONT_LBL, lsz, True))
+            p.drawText(QRect(dx, 0, dlbl_w, h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, dr_str)
+
+            p.setPen(PEN_BLUE()); p.setFont(F(FONT_NUM, vsz, True))
+            p.drawText(QRect(val_dx, 1, val_w, row_h + 1),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                       f"R: {_fmt(d['rn'])}")
+            p.setPen(PEN_GREEN())
+            p.drawText(QRect(val_dx, row_h - 1, val_w, row_h + 1),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                       f"W: {_fmt(d['wn'])}")
+
+            if gw_d > 10:
+                p.setBrush(BRUSH_TRACK()); p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRectF(gx_d, gy, gw_d, gh), 4, 4)
+                self._draw_sparkline(p, self._dr_hist, self._disk_peak,
+                                     C_BLUE(), 25, gx_d, gy, gw_d, gh)
+                self._draw_sparkline(p, self._dw_hist, self._disk_peak,
+                                     C_GREEN(), 25, gx_d, gy, gw_d, gh)
+        else:
+            self._drive_rect = QRect()
+            p.setPen(PEN_DIM()); p.setFont(F(FONT_LBL, lsz))
+            p.drawText(QRect(dx, 0, w - dx - pad, h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "DISK  —")
+
+        p.end()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SENSOR LIST PANEL — AMD-style: sections with eye-toggle rows
+# ══════════════════════════════════════════════════════════════════════════════
+_SENSOR_SECTIONS = [
+    ("CPU",     [("cpu_temp",          "CPU Temperature"),
+                 ("cpu_load",          "CPU Load"),
+                 ("cpu_power",         "CPU Power"),
+                 ("cpu_freq",          "CPU Clock Speed"),
+                 ("cpu_voltage",       "CPU Voltage"),
+                 ("cpu_elec_current",  "CPU Electrical Current"),
+                 ("cpu_therm_current", "CPU Thermal Current")]),
+    ("GPU",     [("gpu_temp",    "GPU Temperature"),
+                 ("gpu_load",    "GPU Load"),
+                 ("gpu_power",   "GPU Power"),
+                 ("gpu_vram",    "GPU VRAM"),
+                 ("gpu_clock",   "GPU Clock Speed"),
+                 ("gpu_voltage", "GPU Voltage"),
+                 ("gpu_mem_clk", "GPU Memory Clock")]),
+    ("DISPLAY", [("fps", "FPS Counter")]),
+    ("MEMORY",  [("ram", "RAM Usage")]),
+]
+
+
+class _SectionHeader(QWidget):
+    def __init__(self, label, parent=None):
+        super().__init__(parent)
+        self._label = label
+        self.setFixedHeight(24)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        pad  = 10
+        sz   = max(6, int(h * 0.46))
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, sz, True))
+        p.drawText(QRect(pad, 0, w - pad * 2, h - 2),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._label)
+        p.setPen(QPen(_t("border"), 1))
+        p.drawLine(pad, h - 1, w - pad, h - 1)
+        p.end()
+
+
+class _ToggleRow(QWidget):
+    ROW_H = 30
+
+    def __init__(self, panel_id, label, visible, on_toggle, parent=None):
+        super().__init__(parent)
+        self._panel_id = panel_id
+        self._label    = label
+        self._vis      = visible
+        self._on_toggle = on_toggle
+        self._hovered  = False
+        self.setFixedHeight(self.ROW_H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_visible(self, v):
+        self._vis = v
+        self.update()
+
+    def enterEvent(self, _): self._hovered = True;  self.update()
+    def leaveEvent(self, _): self._hovered = False; self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._vis = not self._vis
+            self._on_toggle(self._panel_id, self._vis)
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        if self._hovered:
+            hov = QColor(_t("blue")); hov.setAlpha(18)
+            p.fillRect(0, 0, w, h, hov)
+
+        pad   = 10
+        sz    = max(7, int(h * 0.38))
+        eye_d = max(10, int(h * 0.38))
+        eye_x = w - pad - eye_d
+        eye_y = (h - eye_d) // 2
+
+        # Eye icon
+        if self._vis:
+            eye_c = _t("blue")
+            p.setBrush(QBrush(eye_c)); p.setPen(Qt.PenStyle.NoPen)
+            # Outer oval
+            p.drawEllipse(QRectF(eye_x, eye_y + eye_d * 0.15,
+                                 eye_d, eye_d * 0.70))
+            # Pupil
+            p.setBrush(QBrush(_t("card")))
+            p.drawEllipse(QRectF(eye_x + eye_d * 0.30, eye_y + eye_d * 0.28,
+                                 eye_d * 0.40, eye_d * 0.40))
+        else:
+            eye_c = _t("dim")
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(eye_c, 1.2))
+            p.drawEllipse(QRectF(eye_x, eye_y + eye_d * 0.15,
+                                 eye_d, eye_d * 0.70))
+            # Slash through eye
+            p.drawLine(QPointF(eye_x + eye_d * 0.1, eye_y + eye_d * 0.85),
+                       QPointF(eye_x + eye_d * 0.9, eye_y + eye_d * 0.15))
+
+        # Label
+        lbl_c = _t("text") if self._vis else _t("dim")
+        p.setPen(QPen(lbl_c))
+        p.setFont(F(FONT_LBL, sz))
+        p.drawText(QRect(pad, 0, eye_x - pad - 4, h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._label)
+
+        # Bottom divider
+        p.setPen(QPen(_t("border"), 1))
+        p.drawLine(pad, h - 1, w - pad, h - 1)
+        p.end()
+
+
+class _SidePanelTab(QWidget):
+    """24px-wide vertical toggle strip."""
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+        self._expanded = True
+        self._hovered  = False
+        self.setFixedWidth(24)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def set_expanded(self, v):
+        self._expanded = v
+        self.update()
+
+    def enterEvent(self, _): self._hovered = True;  self.update()
+    def leaveEvent(self, _): self._hovered = False; self.update()
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        c = QColor(_t("card"))
+        if self._hovered:
+            c = c.lighter(130) if _theme_name == "dark" else c.darker(108)
+        p.fillRect(0, 0, w, h, c)
+        p.setPen(PEN_BORDER()); p.drawLine(0, 0, 0, h)
+        arrow = "◀" if self._expanded else "▶"
+        p.save()
+        p.translate(w // 2, h // 2); p.rotate(-90)
+        p.setPen(PEN_DIM()); p.setFont(F(FONT_LBL, 8))
+        p.drawText(QRect(-50, -w // 2, 100, w), Qt.AlignmentFlag.AlignCenter,
+                   f"SENSORS  {arrow}")
+        p.restore()
+        p.end()
+
+
+class SensorListPanel(QWidget):
+    """AMD-style side panel with eye-toggle rows per sensor + fan/extra sections."""
+    EXPANDED_W  = 260
+    COLLAPSED_W = 0
+
+    def __init__(self, on_visibility_change, parent=None):
+        super().__init__(parent)
+        self._on_vis  = on_visibility_change
+        self._expanded = True
+        self._rows    = {}   # panel_id -> _ToggleRow
+
+        self.setFixedWidth(self.EXPANDED_W + 24)   # content + tab
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Scroll area for all content
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea{border:none;background:transparent;}"
+            "QScrollBar:vertical{background:transparent;width:6px;border-radius:3px;}"
+            "QScrollBar::handle:vertical{background:#555;border-radius:3px;min-height:20px;}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        )
+
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(0, 6, 0, 8)
+        cl.setSpacing(0)
+
+        # Sensor toggle sections
+        for section_name, items in _SENSOR_SECTIONS:
+            cl.addWidget(_SectionHeader(section_name))
+            for panel_id, label in items:
+                row = _ToggleRow(panel_id, label, True, self._row_toggled)
+                self._rows[panel_id] = row
+                cl.addWidget(row)
+
+        cl.addStretch()
+        self._scroll.setWidget(content)
+        outer.addWidget(self._scroll, stretch=1)
+
+        # Tab strip on right edge — toggle button between panel and main grid
+        self._tab = _SidePanelTab(self.toggle_expand)
+        outer.addWidget(self._tab)
+
+    def _row_toggled(self, panel_id, visible):
+        self._on_vis(panel_id, visible)
+
+    def set_panel_visible(self, panel_id, visible):
+        if panel_id in self._rows:
+            self._rows[panel_id].set_visible(visible)
+
+    def toggle_expand(self):
+        self._expanded = not self._expanded
+        self._scroll.setVisible(self._expanded)
+        self.setFixedWidth((self.EXPANDED_W + 24) if self._expanded else 24)
+        self._tab.set_expanded(self._expanded)
+
+    def is_expanded(self):
+        return self._expanded
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RIGHT PANEL — fans + extra sensors (right side, always visible)
+# ══════════════════════════════════════════════════════════════════════════════
+class RightPanel(QWidget):
+    """Holds FanPanel, DIMM temps, and ExtraSensorsPanel stacked vertically on the right."""
+    WIDTH = 240
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(8)
+
+        self.fan_panel   = FanPanel()
+        self.ram_info    = RamInfoStrip()
+        self.extra_panel = ExtraSensorsPanel()
+
+        vbox.addWidget(self.fan_panel, stretch=1)
+        vbox.addWidget(self.ram_info)
+        vbox.addWidget(self.extra_panel)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  TITLE BAR — draggable bar with settings / fullscreen / close icons
 # ══════════════════════════════════════════════════════════════════════════════
 class TitleBar(QWidget):
@@ -746,7 +1206,8 @@ class TitleBar(QWidget):
     sig_fullscreen = None
     sig_close      = None
 
-    def __init__(self, on_settings, on_fullscreen, on_minimize, on_close, parent=None):
+    def __init__(self, on_settings, on_fullscreen, on_minimize, on_close,
+                 on_panel_toggle=None, parent=None):
         super().__init__(parent)
         self._on_settings   = on_settings
         self._on_fullscreen = on_fullscreen
@@ -761,10 +1222,10 @@ class TitleBar(QWidget):
 
     # ── Button rects (computed each paint) ───────────────────────────────────
     def _btn_rects(self):
-        h  = self.height()
-        bw = max(28, int(h * 0.85))
-        bh = max(20, int(h * 0.70))
-        y  = (h - bh) // 2
+        h   = self.height()
+        bw  = max(28, int(h * 0.85))
+        bh  = max(20, int(h * 0.70))
+        y   = (h - bh) // 2
         gap = max(3, int(bw * 0.12))
         x4 = self.width() - bw - 6
         x3 = x4 - bw - gap
@@ -850,10 +1311,10 @@ class TitleBar(QWidget):
         if e.button() == Qt.MouseButton.LeftButton:
             pos   = e.position().toPoint()
             rects = self._btn_rects()
-            if rects["settings"].contains(pos):  self._on_settings()
-            elif rects["fs"].contains(pos):      self._on_fullscreen()
-            elif rects["min"].contains(pos):     self._on_minimize()
-            elif rects["close"].contains(pos):   self._on_close()
+            if   rects["settings"].contains(pos): self._on_settings()
+            elif rects["fs"].contains(pos):       self._on_fullscreen()
+            elif rects["min"].contains(pos):      self._on_minimize()
+            elif rects["close"].contains(pos):    self._on_close()
             self._drag_pos = None
 
     def leaveEvent(self, _):
@@ -963,18 +1424,25 @@ class SettingsDialog(QDialog):
 #  CARD — dark rounded tile, fully scalable
 # ══════════════════════════════════════════════════════════════════════════════
 class Card(QWidget):
-    def __init__(self, slot_id=None, on_swap=None, parent=None):
+    _MIME = "application/x-cc-panel"
+
+    def __init__(self, slot_id=None, panel_id=None, on_swap=None, parent=None):
         super().__init__(parent)
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(12, 12, 12, 12)
+        self._layout   = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 10, 10, 10)
         self._layout.setSpacing(4)
-        self._slot_id = slot_id
-        self._on_swap = on_swap
+        self._slot_id  = slot_id
+        self._panel_id = panel_id
+        self._on_swap  = on_swap
+        self._drag_start = None
+        self._drop_hover = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
+        self.setAcceptDrops(True)
 
     def add(self, w, stretch=0):
         self._layout.addWidget(w, stretch)
+        w.show()
 
     def clear(self):
         while self._layout.count():
@@ -983,30 +1451,75 @@ class Card(QWidget):
             if w:
                 w.setParent(None)
 
-    def contextMenuEvent(self, event):
-        if self._slot_id is None or self._on_swap is None:
+    # ── Drag source ──────────────────────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.position().toPoint()
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+
+    def mouseMoveEvent(self, e):
+        if (self._drag_start is None or self._panel_id is None or
+                not (e.buttons() & Qt.MouseButton.LeftButton)):
             return
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            "QMenu { background: #2a2a36; color: #dde0f0; border: 1px solid #444; }"
-            "QMenu::item:selected { background: #3c8cff; }"
-            if _theme_name == "dark" else
-            "QMenu { background: #f0f0f6; color: #1e1e2e; border: 1px solid #ccc; }"
-            "QMenu::item:selected { background: #3c8cff; color: white; }"
-        )
-        for pid, name in PANEL_CHOICES:
-            action = menu.addAction(name)
-            action.setData(pid)
-        chosen = menu.exec(event.globalPos())
-        if chosen:
-            self._on_swap(self._slot_id, chosen.data())
+        if ((e.position().toPoint() - self._drag_start).manhattanLength()
+                < QApplication.startDragDistance()):
+            return
+
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(self._panel_id)
+        drag.setMimeData(mime)
+
+        # Grab a semi-transparent thumbnail of this card as the drag image
+        pix = self.grab()
+        w2  = max(60, pix.width() // 2)
+        h2  = max(40, pix.height() // 2)
+        scaled = pix.scaled(w2, h2,
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        faded = QPixmap(scaled.size())
+        faded.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(faded)
+        pp.setOpacity(0.75)
+        pp.drawPixmap(0, 0, scaled)
+        pp.end()
+        drag.setPixmap(faded)
+        drag.setHotSpot(QPoint(faded.width() // 2, faded.height() // 2))
+
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start = None
+
+    # ── Drop target ──────────────────────────────────────────────────────────
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasText() and e.mimeData().text() != self._panel_id:
+            self._drop_hover = True
+            self.update()
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self._drop_hover = False
+        self.update()
+
+    def dropEvent(self, e):
+        self._drop_hover = False
+        src = e.mimeData().text()
+        if src and self._on_swap and self._slot_id is not None:
+            self._on_swap(self._slot_id, src)
+        e.acceptProposedAction()
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setBrush(QBrush(C_CARD()))
-        p.setPen(PEN_BORDER())
+        border = QColor(_t("blue")) if self._drop_hover else _t("border")
+        pen_w  = 2 if self._drop_hover else 1
+        p.setPen(QPen(border, pen_w))
         p.drawRoundedRect(QRectF(1, 1, self.width()-2, self.height()-2), 14, 14)
+        if self._drop_hover:
+            hl = QColor(_t("blue")); hl.setAlpha(18)
+            p.fillRect(2, 2, self.width()-4, self.height()-4, hl)
         p.end()
 
 
@@ -1034,10 +1547,12 @@ class RamInfoStrip(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h  = self.width(), self.height()
-        pad   = 10
-        row_h = 30
-        sz    = max(6, min(int(row_h * 0.50), _fsz(w - pad * 2, 20)))
+        w, h   = self.width(), self.height()
+        pad    = 10
+        avail  = w - pad * 2
+        row_h  = 30
+        # font size scales with both row height AND available width
+        sz = max(6, min(int(row_h * 0.46), _fsz(avail, 22)))
 
         p.setPen(PEN_BORDER())
         p.drawLine(pad, 0, w - pad, 0)
@@ -1047,41 +1562,45 @@ class RamInfoStrip(QWidget):
         pct      = used_gb / max(total_gb, 1)
         ram_c    = C_CRIT() if pct > 0.90 else (C_WARN() if pct > 0.75 else C_TEXT())
 
+        val_str  = f"{used_gb:.1f} / {total_gb:.0f} GB"
+        lbl_str  = "System"
+        # Split width: label left half, value right half (no overlap)
+        half = avail // 2
         p.setPen(PEN_DIM())
         p.setFont(F(FONT_LBL, sz))
-        p.drawText(QRect(pad, 0, int(w * 0.40), row_h),
+        p.drawText(QRect(pad, 0, half, row_h),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   "💾 System")
+                   lbl_str)
         p.setPen(QPen(ram_c))
         p.setFont(F(FONT_NUM, sz, True))
-        p.drawText(QRect(0, 0, w - pad, row_h),
+        p.drawText(QRect(pad + half, 0, half, row_h),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                   f"{used_gb:.1f} / {total_gb:.0f} GB")
+                   val_str)
 
         for i, (lbl, temp) in enumerate(self._dimm_temps):
-            y   = row_h + i * 24
-            rh  = 24
-            sz2 = max(6, int(rh * 0.46))
-            tc  = C_CRIT() if temp > 85 else (C_WARN() if temp > 70 else C_TEXT())
+            y    = row_h + i * 24
+            rh   = 24
+            sz2  = max(6, min(int(rh * 0.44), _fsz(avail, 18)))
+            tc   = C_CRIT() if temp > 85 else (C_WARN() if temp > 70 else C_TEXT())
 
             p.setPen(PEN_DIM())
             p.setFont(F(FONT_LBL, sz2))
-            p.drawText(QRect(pad, y, int(w * 0.55), rh),
+            p.drawText(QRect(pad, y, half, rh),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       f"🌡 {lbl}")
+                       lbl)
             p.setPen(QPen(tc))
             p.setFont(F(FONT_NUM, sz2, True))
-            p.drawText(QRect(0, y, w - pad, rh),
+            p.drawText(QRect(pad + half, y, half, rh),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        f"{temp:.0f}°C")
 
         if not self._dimm_temps:
-            sz2 = max(5, int(20 * 0.40))
+            sz2 = max(5, min(int(20 * 0.40), _fsz(avail, 28)))
             p.setPen(PEN_DIM())
             p.setFont(F(FONT_LBL, sz2))
-            p.drawText(QRect(pad, row_h, w - pad * 2, 20),
+            p.drawText(QRect(pad, row_h, avail, 20),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       "⚠ Start HWiNFO for DIMM temps")
+                       "Start HWiNFO for DIMM temps")
         p.end()
 
 
@@ -1440,10 +1959,7 @@ class FpsDisplay(QWidget):
         self._val = -1.0 if v < 0 else max(0.0, float(v))
 
     def tick(self):
-        if self._val < 0:
-            self._disp = -1.0   # snap immediately, no lerp
-        else:
-            self._disp += (self._val - self._disp) * 0.18
+        self._disp = self._val
         self.update()
 
     def paintEvent(self, _):
@@ -1458,10 +1974,11 @@ class FpsDisplay(QWidget):
                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                    "FPS")
 
-        num_size = max(20, int(h * 0.30))
+        display  = "—" if self._disp < 0 else f"{self._disp:.0f}"
+        scale    = 0.30 if len(display) <= 2 else (0.22 if len(display) == 3 else 0.18)
+        num_size = max(16, int(h * scale))
         p.setPen(PEN_TEXT())
         p.setFont(F(FONT_NUM, num_size, True))
-        display = "—" if self._disp < 0 else f"{self._disp:.0f}"
         p.drawText(QRect(0, int(h * 0.18), w, int(h * 0.72)),
                    Qt.AlignmentFlag.AlignCenter, display)
         p.end()
@@ -1673,6 +2190,11 @@ class CommandCenter(QMainWindow):
         self._timer.timeout.connect(self._apply_data)
         self._timer.start(1000)
 
+        # Fast FPS refresh — polls ETW/RTSS counter directly, bypasses 1 s reader loop
+        self._fps_timer = QTimer(self)
+        self._fps_timer.timeout.connect(self._update_fps_fast)
+        self._fps_timer.start(250)
+
         # Hardware reads happen on a background thread — never block the UI
         self._pending_data = None
         self._data_lock    = threading.Lock()
@@ -1758,17 +2280,17 @@ class CommandCenter(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
 
-        # Root: vertical — title bar on top, content below
         root_vbox = QVBoxLayout(root)
         root_vbox.setContentsMargins(0, 0, 0, 0)
         root_vbox.setSpacing(0)
 
         self._title_bar = TitleBar(
-            on_settings   = self._open_settings,
-            on_fullscreen = self.toggle_fullscreen,
-            on_minimize   = self.close,      # closeEvent minimizes to tray
-            on_close      = self._tray_quit,  # actually quit
-            parent        = root,
+            on_settings     = self._open_settings,
+            on_fullscreen   = self.toggle_fullscreen,
+            on_minimize     = self.close,
+            on_close        = self._tray_quit,
+            on_panel_toggle = self._toggle_sensor_panel,
+            parent          = root,
         )
         root_vbox.addWidget(self._title_bar)
 
@@ -1776,100 +2298,130 @@ class CommandCenter(QMainWindow):
         if not hwinfo_available():
             root_vbox.addWidget(self._hwinfo_banner)
         else:
-            self._hwinfo_banner.setParent(None)   # not in layout at all
+            self._hwinfo_banner.setParent(None)
 
-        # Content area
-        content = QWidget()
-        root_vbox.addWidget(content, stretch=1)
+        # Middle row: sensor panel (left) + card grid (right)
+        mid = QWidget()
+        root_vbox.addWidget(mid, stretch=1)
+        mid_hbox = QHBoxLayout(mid)
+        mid_hbox.setContentsMargins(0, 10, 8, 10)
+        mid_hbox.setSpacing(10)
 
-        outer = QHBoxLayout(content)
-        outer.setContentsMargins(16, 12, 16, 16)
-        outer.setSpacing(12)
-
-        # ── Create ALL sensor widgets (always available regardless of layout) ─
+        # Create sensor widgets
         self._cpu_temp        = Gauge("CPU TEMP", "°C", 110,
                                       HW_PROFILE.cpu_temp_warn, HW_PROFILE.cpu_temp_crit)
         self._cpu_load        = Gauge("CPU LOAD", "%",  100, 75, 90)
+        self._cpu_power_gauge = Gauge("CPU PWR",  "W",
+                                      max(150, int(HW_PROFILE.cpu_tdp * 1.4)),
+                                      HW_PROFILE.cpu_power_warn, HW_PROFILE.cpu_tdp)
         self._gpu_temp        = Gauge("GPU TEMP", "°C", 110,
                                       HW_PROFILE.gpu_temp_warn, HW_PROFILE.gpu_temp_crit)
         self._gpu_load        = Gauge("GPU LOAD", "%",  100, 80, 95)
+        self._gpu_vram_gauge      = Gauge("VRAM",      "%",   100, 75, 90)
+        self._gpu_power_gauge     = Gauge("GPU PWR",   "W",
+                                          max(200, int(HW_PROFILE.gpu_power_warn * 1.4)),
+                                          HW_PROFILE.gpu_power_warn,
+                                          int(HW_PROFILE.gpu_power_warn * 1.2))
+        self._cpu_freq_gauge      = Gauge("CPU CLK",   "GHz", 8,    6,    7)
+        self._cpu_voltage_gauge   = Gauge("CPU VOLT",  "V",   2.0,  1.3,  1.5)
+        self._cpu_elec_gauge      = Gauge("CPU CURR",  "A",   200,  100,  150)
+        self._cpu_therm_gauge     = Gauge("CPU THRM",  "A",   100,  50,   75)
+        self._gpu_clock_gauge     = Gauge("GPU CLK",   "MHz", 3500, 2800, 3000)
+        self._gpu_voltage_gauge   = Gauge("GPU VOLT",  "mV",  2000, 1000, 1400)
+        self._gpu_mem_clk_gauge   = Gauge("VRAM CLK",  "MHz", 4000, 3200, 3600)
         self._fps             = FpsDisplay()
         self._strip_cpu_info  = StatsStrip(StatsStrip.MODE_CPU_INFO)
         self._strip_cpu_cores = StatsStrip(StatsStrip.MODE_CPU_CORES)
         self._strip_gpu_info  = StatsStrip(StatsStrip.MODE_GPU_INFO)
         self._strip_gpu_mem   = StatsStrip(StatsStrip.MODE_GPU_MEM)
         self._ram_load        = Gauge("RAM LOAD", "%", 100, 75, 90)
-        self._ram_info        = RamInfoStrip()
         self._net             = NetGraph()
         self._ssd             = SsdPanel()
 
-        # ── Main grid — populated from layout config ─────────────────────────
+        # Card grid — dynamic, 3 columns max
         main_widget = QWidget()
         self._grid = QGridLayout(main_widget)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(12)
-        for c in range(5):
+        self._grid.setSpacing(10)
+        for c in range(4):
             self._grid.setColumnStretch(c, 1)
-        self._grid.setRowStretch(0, 1)
-        self._grid.setRowStretch(1, 1)
 
-        # Parse layout from settings
+        # Load layout — migrate out legacy footer panels (network/disk moved to footer)
+        _FOOTER_PANELS  = {"network", "disk_io", "net_ssd"}
+        _VALID_PANELS   = set(_DEFAULT_LAYOUT_STR.split(","))
         layout_str = self._settings.get("layout", _DEFAULT_LAYOUT_STR)
-        self._current_layout = layout_str.split(",")
-        # Ensure exactly 7 slots
-        while len(self._current_layout) < 7:
-            defaults = _DEFAULT_LAYOUT_STR.split(",")
-            self._current_layout.append(defaults[len(self._current_layout) % len(defaults)])
-        self._current_layout = self._current_layout[:7]
+        defaults   = _DEFAULT_LAYOUT_STR.split(",")
+        loaded     = [p for p in layout_str.split(",")
+                      if p not in _FOOTER_PANELS and p in _VALID_PANELS]
+        # Fill any missing slots with defaults not already present
+        for d in defaults:
+            if d not in loaded:
+                loaded.append(d)
+        self._current_layout = loaded[:len(defaults)]
 
-        # Create cards for each slot
-        self._slot_cards = []
-        for i, panel_id in enumerate(self._current_layout):
-            card = self._create_panel_card(panel_id, i)
-            row, col, rspan, cspan = SLOT_GRID[i]
-            self._grid.addWidget(card, row, col, rspan, cspan)
-            self._slot_cards.append(card)
+        # Load hidden panels
+        hidden_str = self._settings.get("hidden_panels", "")
+        self._hidden_panel_ids = set(x.strip() for x in hidden_str.split(",") if x.strip())
 
-        # ── Right column: Fan panel + Extra Sensors ──────────────────────────
-        self._fan_panel   = FanPanel()
-        self._extra_panel = ExtraSensorsPanel()
+        # Sensor list panel (AMD-style) — left side
+        self._sensor_panel = SensorListPanel(on_visibility_change=self._on_sensor_vis_change)
+        mid_hbox.addWidget(self._sensor_panel)
 
-        right_col = QWidget()
-        right_col.setSizePolicy(QSizePolicy.Policy.Preferred,
-                                QSizePolicy.Policy.Expanding)
-        right_col.setMinimumWidth(220)
-        right_col.setMaximumWidth(400)
-        right_vbox = QVBoxLayout(right_col)
-        right_vbox.setContentsMargins(0, 0, 0, 0)
-        right_vbox.setSpacing(12)
-        right_vbox.addWidget(self._fan_panel,   stretch=1)
-        right_vbox.addWidget(self._extra_panel, stretch=0)
+        mid_hbox.addWidget(main_widget, stretch=1)
 
-        outer.addWidget(main_widget, stretch=5)
-        outer.addWidget(right_col,   stretch=1)
+        # Right panel — fans + extra sensors
+        self._right_panel = RightPanel()
+        mid_hbox.addWidget(self._right_panel)
+
+        # Sync initial visibility state to side panel
+        for pid in self._hidden_panel_ids:
+            self._sensor_panel.set_panel_visible(pid, False)
+
+        # Build initial grid
+        self._slot_cards = [None] * len(self._current_layout)
+        self._rebuild_all_slots()
+
+        # Footer
+        self._footer = FooterBar()
+        root_vbox.addWidget(self._footer)
 
     # ── Panel factory ────────────────────────────────────────────────────────
     def _create_panel_card(self, panel_id, slot_idx):
         """Create a Card populated with the right widget(s) for panel_id."""
-        card = Card(slot_id=slot_idx, on_swap=self._swap_slot)
+        card = Card(slot_id=slot_idx, panel_id=panel_id, on_swap=self._swap_slot)
 
         if panel_id == "cpu_temp":
             card.add(self._cpu_temp, 1)
-            card.add(self._strip_cpu_info, 0)
         elif panel_id == "cpu_load":
             card.add(self._cpu_load, 1)
-            card.add(self._strip_cpu_cores, 0)
         elif panel_id == "gpu_temp":
             card.add(self._gpu_temp, 1)
-            card.add(self._strip_gpu_info, 0)
         elif panel_id == "gpu_load":
             card.add(self._gpu_load, 1)
-            card.add(self._strip_gpu_mem, 0)
         elif panel_id == "fps":
             card.add(self._fps, 1)
         elif panel_id == "ram":
             card.add(self._ram_load, 1)
-            card.add(self._ram_info, 0)
+        elif panel_id == "gpu_vram":
+            card.add(self._gpu_vram_gauge, 1)
+        elif panel_id == "gpu_power":
+            card.add(self._gpu_power_gauge, 1)
+        elif panel_id == "cpu_power":
+            card.add(self._cpu_power_gauge, 1)
+        elif panel_id == "cpu_freq":
+            card.add(self._cpu_freq_gauge, 1)
+        elif panel_id == "cpu_voltage":
+            card.add(self._cpu_voltage_gauge, 1)
+        elif panel_id == "cpu_elec_current":
+            card.add(self._cpu_elec_gauge, 1)
+        elif panel_id == "cpu_therm_current":
+            card.add(self._cpu_therm_gauge, 1)
+        elif panel_id == "gpu_clock":
+            card.add(self._gpu_clock_gauge, 1)
+        elif panel_id == "gpu_voltage":
+            card.add(self._gpu_voltage_gauge, 1)
+        elif panel_id == "gpu_mem_clk":
+            card.add(self._gpu_mem_clk_gauge, 1)
         elif panel_id == "network":
             card.add(self._net, 1)
         elif panel_id == "disk_io":
@@ -1913,28 +2465,56 @@ class CommandCenter(QMainWindow):
         save_settings(self._settings)
 
     def _rebuild_all_slots(self):
-        """Tear down and recreate all 7 slot cards."""
-        # Detach all sensor widgets from their current parents
-        for w in (self._cpu_temp, self._cpu_load, self._gpu_temp, self._gpu_load,
-                  self._fps, self._ram_load, self._ram_info, self._net, self._ssd,
-                  self._strip_cpu_info, self._strip_cpu_cores,
-                  self._strip_gpu_info, self._strip_gpu_mem):
+        """Rebuild card grid — visible panels reflow left→right, 3 per row."""
+        for w in (self._cpu_temp, self._cpu_load, self._cpu_power_gauge,
+                  self._cpu_freq_gauge, self._cpu_voltage_gauge,
+                  self._cpu_elec_gauge, self._cpu_therm_gauge,
+                  self._gpu_temp, self._gpu_load, self._gpu_power_gauge,
+                  self._gpu_vram_gauge, self._gpu_clock_gauge, self._gpu_voltage_gauge,
+                  self._gpu_mem_clk_gauge, self._fps, self._ram_load,
+                  self._net, self._ssd):
             w.setParent(None)
+            w.hide()
 
-        # Remove old cards from grid
         for card in self._slot_cards:
-            self._grid.removeWidget(card)
-            card.setParent(None)
-            card.deleteLater()
+            if card is not None:
+                self._grid.removeWidget(card)
+                card.setParent(None)
+                card.deleteLater()
 
-        # Recreate all cards
-        self._slot_cards = []
-        for i, panel_id in enumerate(self._current_layout):
-            card = self._create_panel_card(panel_id, i)
-            row, col, rspan, cspan = SLOT_GRID[i]
-            self._grid.addWidget(card, row, col, rspan, cspan)
-            self._slot_cards.append(card)
+        # Clear row stretches
+        for r in range(5):
+            self._grid.setRowStretch(r, 0)
+
+        visible = [(i, pid) for i, pid in enumerate(self._current_layout)
+                   if pid not in self._hidden_panel_ids]
+
+        self._slot_cards = [None] * len(self._current_layout)
+        for pos, (slot_idx, panel_id) in enumerate(visible):
+            card = self._create_panel_card(panel_id, slot_idx)
+            row  = pos // 4
+            col  = pos % 4
+            self._grid.addWidget(card, row, col)
+            self._slot_cards[slot_idx] = card
             card.show()
+
+        n_rows = max(1, (len(visible) + 3) // 4)
+        for r in range(n_rows):
+            self._grid.setRowStretch(r, 1)
+
+    def _on_sensor_vis_change(self, panel_id, visible):
+        """Called by SensorListPanel when user clicks an eye toggle."""
+        if visible:
+            self._hidden_panel_ids.discard(panel_id)
+        else:
+            self._hidden_panel_ids.add(panel_id)
+        self._settings["hidden_panels"] = ",".join(self._hidden_panel_ids)
+        save_settings(self._settings)
+        self._rebuild_all_slots()
+
+    def _toggle_sensor_panel(self):
+        """Called by TitleBar panel button."""
+        self._sensor_panel.toggle_expand()
 
     # ── Poll hardware ─────────────────────────────────────────────────────────
     def _reader_loop(self):
@@ -1948,6 +2528,13 @@ class CommandCenter(QMainWindow):
             except Exception as ex:
                 print(f"[reader] {ex}")
             time.sleep(1.0)
+
+    def _update_fps_fast(self):
+        """250 ms timer — pushes real RTSS fps when available; GPU estimate via _apply_data."""
+        fps = get_foreground_fps()
+        if fps > 0:
+            self._fps.set_value(fps)
+            self._fps.update()
 
     def _apply_data(self):
         """Main thread (QTimer) — picks up latest data and updates widgets."""
@@ -1966,14 +2553,31 @@ class CommandCenter(QMainWindow):
         self._strip_gpu_mem.set_gpu(d.gpu_power, d.gpu_core_clk, d.gpu_mem_clk,
                                     d.gpu_mem_used, d.gpu_mem_total, d.gpu_voltage)
         self._ram_load.set_value((d.ram_used / max(d.ram_total, 1)) * 100)
-        self._ram_info.set_values(d.ram_used, d.ram_total, d.dimm_temps)
+        self._right_panel.ram_info.set_values(d.ram_used, d.ram_total, d.dimm_temps)
+        vram_pct = (d.gpu_mem_used / max(d.gpu_mem_total, 1)) * 100 if d.gpu_mem_total > 0 else 0.0
+        self._gpu_vram_gauge.set_value(vram_pct)
+        self._gpu_power_gauge.set_value(d.gpu_power)
+        self._cpu_power_gauge.set_value(d.cpu_power)
+        self._cpu_freq_gauge.set_value(d.cpu_freq / 1000.0)   # MHz → GHz
+        self._cpu_voltage_gauge.set_value(d.cpu_voltage)
+        self._cpu_elec_gauge.set_value(d.cpu_electrical_current)
+        self._cpu_therm_gauge.set_value(d.cpu_thermal_current)
+        self._gpu_clock_gauge.set_value(d.gpu_core_clk)
+        self._gpu_voltage_gauge.set_value(d.gpu_voltage * 1000.0)  # V → mV
+        self._gpu_mem_clk_gauge.set_value(d.gpu_mem_clk)
         self._fps.set_value(d.fps)
         self._net.push(d.net_tx, d.net_rx, d.net_ping_ms, d.net_packet_loss)
         self._ssd.push(d.disk_io)
-        self._fan_panel.set_fans(d.fans)
-        self._extra_panel.set_sensors(d.extra_sensors)
-        for w in (self._cpu_temp, self._cpu_load, self._gpu_temp,
-                  self._gpu_load, self._ram_load, self._fps):
+        self._footer.push_network(d.net_tx, d.net_rx, d.net_ping_ms, d.net_packet_loss)
+        self._footer.push_disk(d.disk_io)
+        self._right_panel.fan_panel.set_fans(d.fans)
+        self._right_panel.extra_panel.set_sensors(d.extra_sensors)
+        for w in (self._cpu_temp, self._cpu_load, self._cpu_power_gauge,
+                  self._cpu_freq_gauge, self._cpu_voltage_gauge,
+                  self._cpu_elec_gauge, self._cpu_therm_gauge,
+                  self._gpu_temp, self._gpu_load, self._gpu_vram_gauge,
+                  self._gpu_power_gauge, self._gpu_clock_gauge, self._gpu_voltage_gauge,
+                  self._gpu_mem_clk_gauge, self._ram_load, self._fps):
             w.tick()
 
     # ── Fullscreen toggle ─────────────────────────────────────────────────────

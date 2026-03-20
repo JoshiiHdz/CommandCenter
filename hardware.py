@@ -22,6 +22,7 @@ import dataclasses
 import collections
 import ctypes
 import ctypes.wintypes
+import threading
 
 import psutil
 
@@ -71,8 +72,11 @@ def hwinfo_available() -> bool:
 def _hwinfo_read_all(d: "SensorData"):
     """
     Parse HWiNFO64 shared memory using the proper header-driven layout.
-    Populates: d.cpu_temp, d.fans, d.cpu_power, d.cpu_voltage,
-               d.gpu_voltage, d.dimm_temps, d.extra_sensors
+    Populates: d.cpu_temp, d.cpu_power, d.cpu_voltage, d.cpu_freq,
+               d.gpu_temp, d.gpu_load, d.gpu_core_clk, d.gpu_mem_clk,
+               d.gpu_power, d.gpu_mem_used, d.gpu_voltage,
+               d.fans, d.dimm_temps, d.extra_sensors
+    HWiNFO values override LHM when available (HWiNFO is more accurate).
     """
     import mmap
     import struct as _struct
@@ -133,14 +137,23 @@ def _hwinfo_read_all(d: "SensorData"):
     OFF_UNIT  = 268
     OFF_VALUE = 284
 
-    fans         = []
-    cpu_temp     = 0.0
-    cpu_power    = 0.0
-    cpu_volt     = 0.0
-    gpu_volt     = 0.0
-    dimm_temps   = []
-    extra        = []          # extra sensors: (label, value, unit_str)
-    extra_labels = set()       # dedup by label
+    fans             = []
+    cpu_temp         = 0.0
+    cpu_power        = 0.0
+    cpu_volt         = 0.0
+    gpu_volt         = 0.0
+    gpu_load         = 0.0
+    gpu_temp         = 0.0
+    gpu_core_clk     = 0.0
+    gpu_mem_clk      = 0.0
+    gpu_power        = 0.0
+    gpu_mem_used     = 0.0
+    cpu_freq         = 0.0
+    cpu_elec_current = 0.0
+    cpu_therm_current= 0.0
+    dimm_temps       = []
+    extra            = []          # extra sensors: (label, value, unit_str)
+    extra_labels     = set()       # dedup by label
 
     _CPU_PWR  = ("cpu package power", "cpu ppt", "cpu power",
                  "package power", "cpu socket power", "cpu total power")
@@ -171,10 +184,14 @@ def _hwinfo_read_all(d: "SensorData"):
 
         label_l = label.lower()
 
-        # CPU temperature — first match wins
+        # Temperature sensors
         if unit in ("", "c", "\xb0c", "°c") and 0 < val < 150:
             if cpu_temp == 0.0 and any(k in label_l for k in _CPU_TEMP_LABELS):
                 cpu_temp = val
+            elif gpu_temp == 0.0 and "gpu" in label_l and any(
+                    k in label_l for k in ("gpu temperature", "gpu temp", "gpu core temp",
+                                           "gpu diode", "gpu hotspot")):
+                gpu_temp = val
             elif any(k in label_l for k in ("spd hub", "dimm", "sodimm",
                                                    "memory temp", "ram temp",
                                                    "tsensor_mem", "ts0_temp", "ts1_temp")):
@@ -194,9 +211,12 @@ def _hwinfo_read_all(d: "SensorData"):
                 fans.append((short, val))
 
         # CPU package power
-        elif unit == "w" and cpu_power == 0.0 and 0 < val < 1000:
-            if any(label_l == p or label_l.startswith(p) for p in _CPU_PWR):
+        elif unit == "w" and 0 < val < 1000:
+            if cpu_power == 0.0 and any(label_l == p or label_l.startswith(p) for p in _CPU_PWR):
                 cpu_power = val
+            elif gpu_power == 0.0 and "gpu" in label_l and any(
+                    k in label_l for k in ("gpu power", "gpu total", "gpu board", "total board power")):
+                gpu_power = val
 
         # Voltages
         elif unit == "v" and 0.1 < val < 3.0:
@@ -204,6 +224,44 @@ def _hwinfo_read_all(d: "SensorData"):
                 cpu_volt = val
             elif gpu_volt == 0.0 and any(label_l == p or label_l.startswith(p) for p in _GPU_VOLT):
                 gpu_volt = val
+
+        # GPU load (%)
+        elif unit == "%" and 0 <= val <= 100:
+            if gpu_load == 0.0 and "gpu" in label_l and any(
+                    k in label_l for k in ("gpu core load", "gpu load", "gpu utilization",
+                                           "gpu usage", "3d load", "gpu d3d")):
+                gpu_load = val
+
+        # GPU / CPU clocks (MHz)
+        elif unit == "mhz" and val > 0:
+            if gpu_core_clk == 0.0 and "gpu" in label_l and any(
+                    k in label_l for k in ("gpu core clock", "gpu clock", "gpu shader",
+                                           "gpu frequency", "gpu engine")):
+                if "memory" not in label_l:
+                    gpu_core_clk = val
+            elif gpu_mem_clk == 0.0 and "gpu" in label_l and "memory" in label_l:
+                gpu_mem_clk = val
+            elif cpu_freq == 0.0 and any(
+                    k in label_l for k in ("cpu package frequency", "cpu frequency",
+                                           "cpu clock", "effective clock")):
+                cpu_freq = val
+
+        # GPU memory used (MB)
+        elif unit == "mb" and val >= 0:
+            if gpu_mem_used == 0.0 and "gpu" in label_l and "used" in label_l:
+                gpu_mem_used = val
+
+        # CPU current (Amperes) — electrical (EDC) and thermal (TDC)
+        elif unit == "a" and 0 < val < 1000:
+            if cpu_elec_current == 0.0 and any(
+                    k in label_l for k in ("edc", "electrical current", "cpu ia",
+                                           "cpu package current", "cpu current",
+                                           "ia current", "electrical")):
+                cpu_elec_current = val
+            elif cpu_therm_current == 0.0 and any(
+                    k in label_l for k in ("tdc", "thermal current", "cpu tj",
+                                           "thermal design current", "thermal")):
+                cpu_therm_current = val
 
         # Flow rates — water cooling controllers (Aquaero, Octo, mobo headers)
         elif unit in ("l/h", "l/min", "lpm") and 0 < val < 500:
@@ -216,7 +274,17 @@ def _hwinfo_read_all(d: "SensorData"):
     if cpu_power > 0: d.cpu_power  = cpu_power
     if cpu_volt  > 0: d.cpu_voltage = cpu_volt
     if gpu_volt  > 0: d.gpu_voltage = gpu_volt
-    if dimm_temps:    d.dimm_temps  = dimm_temps
+    # GPU metrics from HWiNFO — override LHM values (HWiNFO is more accurate)
+    if gpu_load     > 0: d.gpu_load     = gpu_load
+    if gpu_temp     > 0: d.gpu_temp     = gpu_temp
+    if gpu_core_clk > 0: d.gpu_core_clk = gpu_core_clk
+    if gpu_mem_clk  > 0: d.gpu_mem_clk  = gpu_mem_clk
+    if gpu_power    > 0: d.gpu_power    = gpu_power
+    if gpu_mem_used > 0: d.gpu_mem_used = gpu_mem_used
+    if cpu_freq          > 0: d.cpu_freq              = cpu_freq
+    if cpu_elec_current  > 0: d.cpu_electrical_current = cpu_elec_current
+    if cpu_therm_current > 0: d.cpu_thermal_current    = cpu_therm_current
+    if dimm_temps:            d.dimm_temps             = dimm_temps
     d.extra_sensors = extra
     fans.sort(key=lambda x: x[0].lower())
     d.fans = fans
@@ -227,10 +295,27 @@ def _hwinfo_read_all(d: "SensorData"):
         _hwinfo_logged_once = True
         log.info("HWiNFO first read: cpu_temp=%.1f  cpu_power=%.1f  fans=%d  dimm=%d  extra=%d",
                  cpu_temp, cpu_power, len(fans), len(dimm_temps), len(extra))
+        log.info("HWiNFO currents: elec=%.1fA  therm=%.1fA", cpu_elec_current, cpu_therm_current)
         if fans:
             log.info("HWiNFO fans: %s", ", ".join(f"{n}={rpm:.0f}" for n, rpm in fans))
         if dimm_temps:
             log.info("HWiNFO DIMMs: %s", ", ".join(f"{lbl}={t:.1f}C" for lbl, t in dimm_temps))
+        # Log all Ampere-unit sensors so we can see exact HWiNFO label names
+        _amp_sensors = []
+        for i in range(n_reading):
+            base = off_reading + i * sz_reading
+            if base + OFF_VALUE + 8 > len(data):
+                break
+            u = data[base + OFF_UNIT : base + OFF_UNIT + 16].split(b'\x00')[0].decode("latin-1", errors="ignore").strip().lower()
+            if u == "a":
+                lbl = data[base + OFF_LABEL : base + OFF_LABEL + 128].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+                try:
+                    v = _struct.unpack_from("<d", data, base + OFF_VALUE)[0]
+                    _amp_sensors.append(f"{lbl}={v:.1f}A")
+                except Exception:
+                    pass
+        if _amp_sensors:
+            log.info("HWiNFO Ampere sensors: %s", ", ".join(_amp_sensors))
 
 _hwinfo_logged_once = False
 
@@ -373,9 +458,11 @@ class SensorData:
     gpu_core_clk: float = 0.0
     gpu_mem_clk:  float = 0.0
     gpu_power:    float = 0.0
-    gpu_fan_rpm:  float = 0.0
-    gpu_voltage:  float = 0.0   # GPU core voltage in volts
-    cpu_voltage:  float = 0.0   # CPU core voltage in volts
+    gpu_fan_rpm:         float = 0.0
+    gpu_voltage:         float = 0.0   # GPU core voltage in volts
+    cpu_voltage:         float = 0.0   # CPU core voltage in volts
+    cpu_electrical_current: float = 0.0  # CPU electrical current (A)
+    cpu_thermal_current:    float = 0.0  # CPU thermal current (A)
     fps:          float = 0.0
 
     net_tx:         float = 0.0
@@ -602,6 +689,98 @@ def _detect_hardware() -> HardwareProfile:
 # Detect hardware once at import time
 HW_PROFILE: HardwareProfile = _detect_hardware()
 
+# ── Real FPS singletons — initialised lazily on first HardwareMonitor() ───────
+_FPS_UPDATE_INTERVAL = 0.25   # seconds between cache refreshes
+
+
+class _FpsSource:
+    """Single owner of ETW + RTSS FPS acquisition.
+
+    A daemon thread calls _resolve() every 250 ms and writes the result to
+    self._cached.  All callers — UI fast timer and hardware reader — read
+    only that cached float.  No process lookups ever run on the UI thread.
+    """
+
+    def __init__(self):
+        self._cached: float            = -1.0
+        self._etw:   '_EtwFpsCounter | None' = None
+        self._rtss:  '_RtssFpsReader | None' = None
+
+    def start(self) -> None:
+        self._rtss = _RtssFpsReader()
+        t = threading.Thread(target=self._update_loop,
+                             daemon=True, name="fps-cache")
+        t.start()
+
+    @property
+    def fps(self) -> float:
+        """Cached present rate. -1.0 = no game detected.
+        Single-object attribute read is GIL-atomic in CPython."""
+        return self._cached
+
+    # ── internal ──────────────────────────────────────────────────────────────
+    def _update_loop(self) -> None:
+        while True:
+            try:
+                self._cached = self._resolve()
+            except Exception:
+                self._cached = -1.0
+            time.sleep(_FPS_UPDATE_INTERVAL)
+
+    def _resolve(self) -> float:
+        """Determine the foreground process and return its present rate.
+
+        Returns DXGI present rate, not display-confirmed FPS. The two values
+        diverge when vsync queue depth > 1, or when driver-level frame
+        generation (DLSS-FG, FSR3) inserts additional presents that inflate
+        the count above the rendered frame rate. RTSS is preferred when
+        available as it carries additional display-correlation metadata.
+        """
+        user32 = ctypes.windll.user32
+        hwnd   = user32.GetForegroundWindow()
+        if not hwnd:
+            return -1.0
+        pid_c = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_c))
+        pid = pid_c.value
+        if not pid:
+            return -1.0
+        try:
+            if psutil.Process(pid).name().lower() in _NON_GAME_PROCS:
+                return -1.0
+        except Exception:
+            return -1.0
+
+        if self._rtss is not None and self._rtss.available():
+            fps = self._rtss.fps_for_pid(pid)
+            if fps >= 1.0:
+                return fps
+
+        return -1.0
+
+
+_fps_source:    '_FpsSource | None' = None
+_fps_init_done: bool                = False
+
+
+def _init_fps_sources() -> None:
+    global _fps_source, _fps_init_done
+    if _fps_init_done:
+        return
+    _fps_init_done = True
+    src = _FpsSource()
+    src.start()
+    _fps_source = src
+
+
+def get_foreground_fps() -> float:
+    """Return the cached present rate for the foreground process.
+
+    -1.0 means no game active or acquisition not yet started.
+    Updated every 250 ms by the fps-cache daemon thread.
+    """
+    return _fps_source.fps if _fps_source is not None else -1.0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 class HardwareMonitor:
@@ -750,6 +929,7 @@ class HardwareMonitor:
 
     # ── Network ───────────────────────────────────────────────────────────────
     def __init__(self):
+        _init_fps_sources()
         self._last_net       = psutil.net_io_counters()
         self._last_time      = time.monotonic()
         try:
@@ -874,28 +1054,16 @@ class HardwareMonitor:
 
     # ── FPS ───────────────────────────────────────────────────────────────────
     def _read_fps(self, d: SensorData):
-        """
-        Show FPS estimate ONLY when a real fullscreen game is running.
-        Uses GPU utilisation to estimate — scales with detected refresh rate.
-        """
-        if not _is_game_running():
+        """FPS from RTSS shared memory; falls back to GPU-load × refresh-rate estimate."""
+        fps = get_foreground_fps()
+        if fps > 0:
+            d.fps = fps
+        elif _is_game_running():
+            # GPU-load × refresh-rate estimate — bounded and clearly approximate
+            refresh = _get_primary_refresh_rate()
+            d.fps = max(1.0, refresh * (d.gpu_load / 100.0))
+        else:
             d.fps = -1.0
-            return
-
-        # Try to get the monitor refresh rate dynamically
-        try:
-            import ctypes
-            user32  = ctypes.windll.user32
-            dc      = user32.GetDC(0)
-            gdi32   = ctypes.windll.gdi32
-            refresh = gdi32.GetDeviceCaps(dc, 116)   # VREFRESH = 116
-            user32.ReleaseDC(0, dc)
-            if refresh < 30 or refresh > 500:
-                refresh = 60
-        except Exception:
-            refresh = 60
-
-        d.fps = max(1.0, refresh * (d.gpu_load / 100.0))
 
 
 # ── Drive map: physical drive number → [(letter, volume_label), ...] ─────────
@@ -994,6 +1162,21 @@ _NON_GAME_PROCS = frozenset({
     "code.exe", "devenv.exe", "idea64.exe",
 })
 
+def _get_primary_refresh_rate() -> float:
+    """Return the primary monitor refresh rate in Hz (defaults to 60.0 on error)."""
+    try:
+        user32 = ctypes.windll.user32
+        hdc    = ctypes.windll.gdi32.CreateDCW("DISPLAY", None, None, None)
+        if hdc:
+            hz  = ctypes.windll.gdi32.GetDeviceCaps(hdc, 116)  # VREFRESH = 116
+            ctypes.windll.gdi32.DeleteDC(hdc)
+            if hz > 0:
+                return float(hz)
+    except Exception:
+        pass
+    return 60.0
+
+
 def _is_game_running() -> bool:
     """
     Return True if a game (fullscreen or high-GPU-load non-system process)
@@ -1040,6 +1223,466 @@ def _is_game_running() -> bool:
 
     except Exception:
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REAL FPS — RTSS shared memory (RivaTuner Statistics Server)
+# ══════════════════════════════════════════════════════════════════════════════
+class _RtssFpsReader:
+    """Reads per-process FPS from RivaTuner / MSI Afterburner shared memory.
+
+    Maintains a ring buffer of (time, frame_count) samples per PID so the
+    rolling-window (N-1)/span calculation matches _EtwFpsCounter.
+    """
+
+    _SM_NAME  = "Global\\RTSSSharedMemoryV2"
+    _MAX_HIST = 16    # samples per PID
+
+    def __init__(self):
+        self._history: dict = {}   # pid -> deque of (mono_time, frame_count)
+
+    def available(self) -> bool:
+        import mmap
+        try:
+            sm = mmap.mmap(-1, 8, tagname=self._SM_NAME, access=mmap.ACCESS_READ)
+            sm.close()
+            return True
+        except Exception:
+            return False
+
+    def fps_for_pid(self, pid: int, min_window: float = 0.25) -> float:
+        import mmap
+        import struct as _s
+        try:
+            sm = mmap.mmap(-1, 256 * 1024, tagname=self._SM_NAME,
+                           access=mmap.ACCESS_READ)
+        except Exception:
+            return 0.0
+        try:
+            if bytes(sm[0:4]) != b'RTSS':
+                return 0.0
+            _ver, entry_size, arr_offset, arr_size = _s.unpack_from('<IIII', sm, 4)
+            for i in range(min(arr_size, 256)):
+                off  = arr_offset + i * entry_size
+                epid = _s.unpack_from('<I', sm, off)[0]
+                if epid != pid:
+                    continue
+                frames = _s.unpack_from('<I', sm, off + 16)[0]
+                now = time.monotonic()
+                dq  = self._history.setdefault(
+                    pid, collections.deque(maxlen=self._MAX_HIST))
+                dq.append((now, frames))
+                if len(dq) < 2:
+                    return 0.0
+                # Walk back to find the oldest sample with enough span
+                for old_t, old_f in dq:
+                    span = dq[-1][0] - old_t
+                    if span >= min_window:
+                        df = (dq[-1][1] - old_f) & 0xFFFF_FFFF
+                        return df / span
+                return 0.0
+            return 0.0
+        except Exception:
+            return 0.0
+        finally:
+            sm.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REAL FPS — ETW DXGI Present event counter
+#  Counts IDXGISwapChain::Present() calls per process in real time.
+#  Same technique used by NVIDIA FrameView / PresentMon.
+# ══════════════════════════════════════════════════════════════════════════════
+import ctypes.wintypes as _wt   # noqa: E402  (already imported above, alias for clarity)
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [('Data1', _wt.ULONG), ('Data2', _wt.USHORT),
+                ('Data3', _wt.USHORT), ('Data4', ctypes.c_ubyte * 8)]
+
+
+class _WNODE_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('BufferSize',        _wt.ULONG),
+        ('ProviderId',        _wt.ULONG),
+        ('HistoricalContext', ctypes.c_ulonglong),
+        ('TimeStamp',         ctypes.c_longlong),
+        ('Guid',              _GUID),
+        ('ClientContext',     _wt.ULONG),
+        ('Flags',             _wt.ULONG),
+    ]
+
+
+class _EVENT_TRACE_PROPERTIES(ctypes.Structure):
+    _fields_ = [
+        ('Wnode',                _WNODE_HEADER),
+        ('BufferSize',           _wt.ULONG),
+        ('MinimumBuffers',       _wt.ULONG),
+        ('MaximumBuffers',       _wt.ULONG),
+        ('MaximumFileSize',      _wt.ULONG),
+        ('LogFileMode',          _wt.ULONG),
+        ('FlushTimer',           _wt.ULONG),
+        ('EnableFlags',          _wt.ULONG),
+        ('AgeLimit',             _wt.LONG),
+        ('NumberOfBuffers',      _wt.ULONG),
+        ('FreeBuffers',          _wt.ULONG),
+        ('EventsLost',           _wt.ULONG),
+        ('BuffersWritten',       _wt.ULONG),
+        ('LogBuffersLost',       _wt.ULONG),
+        ('RealTimeBuffersLost',  _wt.ULONG),
+        ('LoggerThreadId',       ctypes.c_void_p),
+        ('LogFileNameOffset',    _wt.ULONG),
+        ('LoggerNameOffset',     _wt.ULONG),
+    ]
+
+
+class _EVENT_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ('Id',      _wt.USHORT),
+        ('Version', ctypes.c_ubyte),
+        ('Channel', ctypes.c_ubyte),
+        ('Level',   ctypes.c_ubyte),
+        ('Opcode',  ctypes.c_ubyte),
+        ('Task',    _wt.USHORT),
+        ('Keyword', ctypes.c_ulonglong),
+    ]
+
+
+class _EVENT_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('Size',            _wt.USHORT),
+        ('HeaderType',      _wt.USHORT),
+        ('Flags',           _wt.USHORT),
+        ('EventProperty',   _wt.USHORT),
+        ('ThreadId',        _wt.ULONG),
+        ('ProcessId',       _wt.ULONG),
+        ('TimeStamp',       ctypes.c_longlong),
+        ('ProviderId',      _GUID),
+        ('EventDescriptor', _EVENT_DESCRIPTOR),
+        ('ProcessorTime',   ctypes.c_ulonglong),
+        ('ActivityId',      _GUID),
+    ]
+
+
+class _ETW_BUFFER_CONTEXT(ctypes.Structure):
+    _fields_ = [('ProcessorNumber', ctypes.c_ubyte),
+                ('Alignment',       ctypes.c_ubyte),
+                ('LoggerId',        _wt.USHORT)]
+
+
+class _EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ('EventHeader',       _EVENT_HEADER),
+        ('BufferContext',      _ETW_BUFFER_CONTEXT),
+        ('ExtendedDataCount',  _wt.USHORT),
+        ('UserDataLength',     _wt.USHORT),
+        ('ExtendedData',       ctypes.c_void_p),
+        ('UserData',           ctypes.c_void_p),
+        ('UserContext',        ctypes.c_void_p),
+    ]
+
+
+class _SYSTEMTIME(ctypes.Structure):
+    _fields_ = [('wYear', _wt.WORD), ('wMonth', _wt.WORD),
+                ('wDayOfWeek', _wt.WORD), ('wDay', _wt.WORD),
+                ('wHour', _wt.WORD), ('wMinute', _wt.WORD),
+                ('wSecond', _wt.WORD), ('wMilliseconds', _wt.WORD)]
+
+
+class _TIME_ZONE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ('Bias',          _wt.LONG),
+        ('StandardName',  ctypes.c_wchar * 32),
+        ('StandardDate',  _SYSTEMTIME),
+        ('StandardBias',  _wt.LONG),
+        ('DaylightName',  ctypes.c_wchar * 32),
+        ('DaylightDate',  _SYSTEMTIME),
+        ('DaylightBias',  _wt.LONG),
+    ]
+
+
+class _EVENT_TRACE_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('Size',          _wt.USHORT),
+        ('FieldTypeFlags', _wt.USHORT),
+        ('Version',       _wt.ULONG),
+        ('ThreadId',      _wt.ULONG),
+        ('ProcessId',     _wt.ULONG),
+        ('TimeStamp',     ctypes.c_longlong),
+        ('Guid',          _GUID),
+        ('ProcessorTime', ctypes.c_ulonglong),
+    ]
+
+
+class _EVENT_TRACE(ctypes.Structure):
+    _fields_ = [
+        ('Header',           _EVENT_TRACE_HEADER),
+        ('InstanceId',       _wt.ULONG),
+        ('ParentInstanceId', _wt.ULONG),
+        ('ParentGuid',       _GUID),
+        ('MofData',          ctypes.c_void_p),
+        ('MofLength',        _wt.ULONG),
+        ('ClientContext',    _wt.ULONG),
+    ]
+
+
+class _TRACE_LOGFILE_HEADER(ctypes.Structure):
+    _fields_ = [
+        ('BufferSize',         _wt.ULONG),
+        ('Version',            _wt.ULONG),
+        ('ProviderVersion',    _wt.ULONG),
+        ('NumberOfProcessors', _wt.ULONG),
+        ('EndTime',            ctypes.c_longlong),
+        ('TimerResolution',    _wt.ULONG),
+        ('MaximumFileSize',    _wt.ULONG),
+        ('LogFileMode',        _wt.ULONG),
+        ('BuffersWritten',     _wt.ULONG),
+        ('LogInstanceGuid',    _GUID),
+        ('LoggerName',         ctypes.c_wchar_p),
+        ('LogFileName',        ctypes.c_wchar_p),
+        ('TimeZone',           _TIME_ZONE_INFORMATION),
+        ('BootTime',           ctypes.c_longlong),
+        ('PerfFreq',           ctypes.c_longlong),
+        ('StartTime',          ctypes.c_longlong),
+        ('ReservedFlags',      _wt.ULONG),
+        ('BuffersLost',        _wt.ULONG),
+    ]
+
+
+class _EVENT_TRACE_LOGFILEW(ctypes.Structure):
+    _fields_ = [
+        ('LogFileName',         ctypes.c_wchar_p),
+        ('LoggerName',          ctypes.c_wchar_p),
+        ('CurrentTime',         ctypes.c_longlong),
+        ('BuffersRead',         _wt.ULONG),
+        ('ProcessTraceMode',    _wt.ULONG),       # union with LogFileMode
+        ('CurrentEvent',        _EVENT_TRACE),
+        ('LogfileHeader',       _TRACE_LOGFILE_HEADER),
+        ('BufferCallback',      ctypes.c_void_p),
+        ('BufferSize',          _wt.ULONG),
+        ('Filled',              _wt.ULONG),
+        ('EventsLost',          _wt.ULONG),
+        ('EventRecordCallback', ctypes.c_void_p),  # union with EventCallback
+        ('IsKernelTrace',       _wt.ULONG),
+        ('Context',             ctypes.c_void_p),
+    ]
+
+
+# Microsoft-Windows-DXGI provider — fires on every IDXGISwapChain::Present call
+_DXGI_PROVIDER = _GUID(
+    0xCA11C036, 0x0102, 0x4A2D,
+    (ctypes.c_ubyte * 8)(0xA6, 0xAD, 0xF0, 0x3C, 0xFE, 0xD5, 0xD3, 0xC9),
+)
+
+_ETW_SESSION_NAME  = "CommandCenter-FPS-v1"
+_INVALID_THANDLE   = ctypes.c_uint64(-1).value
+_WNODE_TRACED_GUID = 0x00020000
+_ETW_REALTIME      = 0x00000100
+_PTM_REALTIME      = 0x00000100
+_PTM_EVENT_RECORD  = 0x10000000
+_ETC_STOP          = 1
+
+
+def _setup_etw_argtypes() -> None:
+    adv = ctypes.windll.advapi32
+    adv.StartTraceW.restype    = _wt.ULONG
+    adv.StartTraceW.argtypes   = [ctypes.POINTER(ctypes.c_uint64),
+                                   ctypes.c_wchar_p, ctypes.c_void_p]
+    adv.ControlTraceW.restype  = _wt.ULONG
+    adv.ControlTraceW.argtypes = [ctypes.c_uint64, ctypes.c_wchar_p,
+                                   ctypes.c_void_p, _wt.ULONG]
+    adv.EnableTraceEx2.restype = _wt.ULONG
+    adv.OpenTraceW.restype     = ctypes.c_uint64
+    adv.OpenTraceW.argtypes    = [ctypes.c_void_p]
+    adv.ProcessTrace.restype   = _wt.ULONG
+    adv.ProcessTrace.argtypes  = [ctypes.POINTER(ctypes.c_uint64),
+                                   _wt.ULONG,
+                                   ctypes.c_void_p, ctypes.c_void_p]
+    adv.CloseTrace.restype     = _wt.ULONG
+    adv.CloseTrace.argtypes    = [ctypes.c_uint64]
+
+
+try:
+    _setup_etw_argtypes()
+except Exception:
+    pass
+
+
+class _EtwFpsCounter:
+    """ETW DXGI Present_Start counter with per-swap-chain tracking.
+
+    The first 8 bytes of Present_Start UserData contain the IDXGISwapChain*
+    pointer.  Modern games (UE5, Genshin, etc.) own multiple swap chains per
+    PID (3D scene, UI, driver overlays).  Tracking per-chain lets us isolate
+    the primary render chain rather than summing all chains blindly.
+
+    fps_for_pid() returns the minimum present-rate among swap chains that
+    are actively presenting at ≥ 5 Hz — the main rendering chain runs at the
+    game's target frame rate; auxiliary chains tend to be faster or slower.
+    """
+
+    def __init__(self):
+        self._lock         = threading.Lock()
+        # key: (pid, swapchain_ptr)  value: deque of monotonic timestamps
+        self._chains: dict = collections.defaultdict(collections.deque)
+        self._session      = ctypes.c_uint64(0)
+        self._trace        = ctypes.c_uint64(_INVALID_THANDLE)
+        self._callback_ref = None
+        self.active        = False
+
+    def start(self) -> None:
+        t = threading.Thread(target=self._run, daemon=True, name="etw-fps")
+        t.start()
+
+    def fps_for_pid(self, pid: int,
+                    min_window: float = 0.25,
+                    min_rate:   float = 5.0) -> float:
+        """Present rate of the primary render chain for pid.
+
+        Chains presenting at < min_rate Hz are excluded (idle/debug chains).
+        Returns the minimum fps among the remaining chains: the main renderer
+        targets the game's frame rate; overlay/UI chains are typically faster.
+
+        Measures DXGI present rate, not display-confirmed FPS. Driver-level
+        frame generation (DLSS-FG, FSR3) inflates this above rendered fps.
+        """
+        now    = time.monotonic()
+        cutoff = now - 2.0
+
+        with self._lock:
+            # Snapshot all swap chains belonging to this pid
+            chains_snap = {
+                sc: list(dq)
+                for (p, sc), dq in self._chains.items()
+                if p == pid
+            }
+
+        fps_values = []
+        for sc, timestamps in chains_snap.items():
+            window = [t for t in timestamps if t >= cutoff]
+            if len(window) < 2:
+                continue
+            span = window[-1] - window[0]
+            if span < min_window:
+                continue
+            fps = (len(window) - 1) / span
+            # Exclude chains below the minimum rate (idle/infrequent)
+            if fps < min_rate:
+                continue
+            fps_values.append(fps)
+
+        if not fps_values:
+            return 0.0
+
+        # The primary render chain presents at the game's target frame rate.
+        # Auxiliary chains (overlays, UI, deferred passes) tend to be faster.
+        return min(fps_values)
+
+    # ── internal ──────────────────────────────────────────────────────────────
+    def _run(self) -> None:
+        try:
+            self._start_session()
+            self.active = True
+            self._process_events()
+        except Exception as exc:
+            log.debug("ETW FPS thread error: %s", exc)
+        finally:
+            self._stop_session()
+            self.active = False
+
+    def _start_session(self) -> None:
+        adv  = ctypes.windll.advapi32
+        name = _ETW_SESSION_NAME
+        xtra = (len(name) + 1) * 2
+        bsz  = ctypes.sizeof(_EVENT_TRACE_PROPERTIES) + xtra
+        buf  = (ctypes.c_byte * bsz)()
+
+        def _fill(b):
+            p = ctypes.cast(b, ctypes.POINTER(_EVENT_TRACE_PROPERTIES)).contents
+            p.Wnode.BufferSize = bsz
+            p.Wnode.Flags      = _WNODE_TRACED_GUID
+            p.LogFileMode      = _ETW_REALTIME
+            p.LoggerNameOffset = ctypes.sizeof(_EVENT_TRACE_PROPERTIES)
+            p.BufferSize       = 256     # larger buffers reduce event loss at high fps
+            p.MinimumBuffers   = 8
+
+        # Kill any leftover session from a previous crash
+        _fill(buf)
+        adv.ControlTraceW(ctypes.c_uint64(0), name,
+                          ctypes.cast(buf, ctypes.c_void_p), _ETC_STOP)
+        ctypes.memset(buf, 0, bsz)
+        _fill(buf)
+        ret = adv.StartTraceW(ctypes.byref(self._session), name,
+                              ctypes.cast(buf, ctypes.c_void_p))
+        if ret not in (0, 183):
+            raise OSError(f"StartTraceW failed: {ret}")
+
+        adv.EnableTraceEx2(
+            self._session, ctypes.byref(_DXGI_PROVIDER),
+            1, 5,
+            ctypes.c_uint64(0xFFFF_FFFF_FFFF_FFFF),
+            ctypes.c_uint64(0), ctypes.c_uint32(0), None,
+        )
+
+    def _process_events(self) -> None:
+        adv = ctypes.windll.advapi32
+        _CB = ctypes.WINFUNCTYPE(None, ctypes.POINTER(_EVENT_RECORD))
+
+        @_CB
+        def _on_event(rec_ptr):
+            try:
+                rec    = rec_ptr.contents
+                opcode = rec.EventHeader.EventDescriptor.Opcode
+                if opcode != 1:      # only Present_Start
+                    return
+                pid = rec.EventHeader.ProcessId
+                ts  = time.monotonic()
+
+                # Extract IDXGISwapChain* from first 8 bytes of UserData
+                sc_ptr = 0
+                if rec.UserDataLength >= 8 and rec.UserData:
+                    sc_ptr = ctypes.cast(
+                        rec.UserData, ctypes.POINTER(ctypes.c_uint64)
+                    ).contents.value
+
+                key = (pid, sc_ptr)
+                with self._lock:
+                    dq = self._chains[key]
+                    dq.append(ts)
+                    # Trim timestamps older than 2 s
+                    cutoff = ts - 2.0
+                    while dq and dq[0] < cutoff:
+                        dq.popleft()
+            except Exception:
+                pass
+
+        self._callback_ref = _on_event
+
+        logfile = _EVENT_TRACE_LOGFILEW()
+        logfile.LoggerName          = _ETW_SESSION_NAME
+        logfile.ProcessTraceMode    = _PTM_REALTIME | _PTM_EVENT_RECORD
+        logfile.EventRecordCallback = ctypes.cast(_on_event, ctypes.c_void_p)
+
+        handle = adv.OpenTraceW(ctypes.byref(logfile))
+        if handle == _INVALID_THANDLE:
+            raise OSError("OpenTraceW failed")
+        self._trace = ctypes.c_uint64(handle)
+
+        h_arr = (ctypes.c_uint64 * 1)(handle)
+        adv.ProcessTrace(h_arr, 1, None, None)   # blocks until CloseTrace
+
+    def _stop_session(self) -> None:
+        adv = ctypes.windll.advapi32
+        if self._trace.value != _INVALID_THANDLE:
+            adv.CloseTrace(self._trace)
+        if self._session.value:
+            xtra = (len(_ETW_SESSION_NAME) + 1) * 2
+            bsz  = ctypes.sizeof(_EVENT_TRACE_PROPERTIES) + xtra
+            buf  = (ctypes.c_byte * bsz)()
+            p    = ctypes.cast(buf, ctypes.POINTER(_EVENT_TRACE_PROPERTIES)).contents
+            p.Wnode.BufferSize = bsz
+            adv.ControlTraceW(self._session, None,
+                              ctypes.cast(buf, ctypes.c_void_p), _ETC_STOP)
 
 
 # ── HWiNFO full scan — fans ───────────────────────────────────────────────────
