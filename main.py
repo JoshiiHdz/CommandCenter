@@ -106,7 +106,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QDialog,
     QComboBox, QCheckBox, QPushButton, QFormLayout,
     QDialogButtonBox, QMenu, QSizePolicy, QSystemTrayIcon,
-    QScrollArea
+    QScrollArea, QSplitter
 )
 from PyQt6.QtCore import Qt, QTimer, QRectF, QRect, QPointF, QSize, QPoint, QMimeData
 from PyQt6.QtGui import (
@@ -222,9 +222,90 @@ THEMES = {
         "titlebar_bg": QColor(220, 222, 230),
         "btn_hover":   QColor(0, 0, 0, 20),
     },
+    "midnight": {
+        "bg":     QColor(10, 10, 18),
+        "card":   QColor(18, 18, 30),
+        "border": QColor(80, 80, 160, 35),
+        "blue":   QColor(90, 120, 255),
+        "warn":   QColor(255, 160, 40),
+        "crit":   QColor(255, 50, 80),
+        "text":   QColor(200, 200, 230),
+        "dim":    QColor(100, 100, 140),
+        "green":  QColor(60, 200, 160),
+        "titlebar_bg": QColor(6, 6, 14),
+        "btn_hover":   QColor(255, 255, 255, 20),
+    },
+    "cyberpunk": {
+        "bg":     QColor(12, 8, 20),
+        "card":   QColor(22, 14, 36),
+        "border": QColor(180, 0, 255, 40),
+        "blue":   QColor(0, 255, 200),
+        "warn":   QColor(255, 220, 0),
+        "crit":   QColor(255, 0, 80),
+        "text":   QColor(230, 230, 255),
+        "dim":    QColor(120, 100, 160),
+        "green":  QColor(0, 255, 140),
+        "titlebar_bg": QColor(8, 4, 16),
+        "btn_hover":   QColor(180, 0, 255, 30),
+    },
+    "nord": {
+        "bg":     QColor(46, 52, 64),
+        "card":   QColor(59, 66, 82),
+        "border": QColor(76, 86, 106, 80),
+        "blue":   QColor(136, 192, 208),
+        "warn":   QColor(235, 203, 139),
+        "crit":   QColor(191, 97, 106),
+        "text":   QColor(229, 233, 240),
+        "dim":    QColor(147, 161, 181),
+        "green":  QColor(163, 190, 140),
+        "titlebar_bg": QColor(36, 40, 50),
+        "btn_hover":   QColor(255, 255, 255, 20),
+    },
+    "solarized": {
+        "bg":     QColor(0, 43, 54),
+        "card":   QColor(7, 54, 66),
+        "border": QColor(88, 110, 117, 60),
+        "blue":   QColor(38, 139, 210),
+        "warn":   QColor(181, 137, 0),
+        "crit":   QColor(220, 50, 47),
+        "text":   QColor(253, 246, 227),
+        "dim":    QColor(131, 148, 150),
+        "green":  QColor(133, 153, 0),
+        "titlebar_bg": QColor(0, 34, 43),
+        "btn_hover":   QColor(255, 255, 255, 20),
+    },
+    "dracula": {
+        "bg":     QColor(40, 42, 54),
+        "card":   QColor(68, 71, 90),
+        "border": QColor(98, 114, 164, 60),
+        "blue":   QColor(139, 233, 253),
+        "warn":   QColor(241, 250, 140),
+        "crit":   QColor(255, 85, 85),
+        "text":   QColor(248, 248, 242),
+        "dim":    QColor(98, 114, 164),
+        "green":  QColor(80, 250, 123),
+        "titlebar_bg": QColor(33, 34, 44),
+        "btn_hover":   QColor(255, 255, 255, 22),
+    },
+    "amd": {
+        "bg":     QColor(18, 18, 18),
+        "card":   QColor(30, 30, 30),
+        "border": QColor(255, 255, 255, 22),
+        "blue":   QColor(230, 60, 0),
+        "warn":   QColor(255, 180, 0),
+        "crit":   QColor(255, 40, 40),
+        "text":   QColor(230, 230, 230),
+        "dim":    QColor(140, 140, 140),
+        "green":  QColor(0, 200, 100),
+        "titlebar_bg": QColor(12, 12, 12),
+        "btn_hover":   QColor(230, 60, 0, 40),
+    },
 }
+# Which themes are "dark" variants (for conditional styling)
+_DARK_THEMES = {"dark", "midnight", "cyberpunk", "nord", "solarized", "dracula", "amd"}
 
 _theme_name = "dark"
+_gauge_style = "arc"   # "arc" | "ring" | "bar" | "minimal"
 
 def _t(key):
     return THEMES[_theme_name][key]
@@ -260,7 +341,7 @@ class _PC:
         cls.brush_blue  = QBrush(t["blue"])
         cls.brush_warn  = QBrush(t["warn"])
         cls.brush_crit  = QBrush(t["crit"])
-        track = QColor(0,0,0,30) if _theme_name=="light" else QColor(255,255,255,18)
+        track = QColor(0,0,0,30) if _theme_name not in _DARK_THEMES else QColor(255,255,255,18)
         cls.brush_track = QBrush(track)
 
 _PC.rebuild()
@@ -643,7 +724,7 @@ class FanPanel(QWidget):
             # Bar track
             bar_y = int(ry + row_h * 0.70)
             p.setPen(Qt.PenStyle.NoPen)
-            bar_track_c = QColor(0, 0, 0, 30) if _theme_name == "light" else QColor(255, 255, 255, 18)
+            bar_track_c = QColor(0, 0, 0, 30) if _theme_name not in _DARK_THEMES else QColor(255, 255, 255, 18)
             p.setBrush(QBrush(bar_track_c))
             p.drawRoundedRect(QRectF(pad, bar_y, bar_w, bar_h), bar_h / 2, bar_h / 2)
 
@@ -750,13 +831,15 @@ class ExtraSensorsPanel(QWidget):
 #  FOOTER BAR — network + disk sparklines with values
 # ══════════════════════════════════════════════════════════════════════════════
 class FooterBar(QWidget):
-    FOOT_H   = 72
-    _NPTS    = 40
+    FOOT_H_MIN = 52
+    FOOT_H_MAX = 100
+    _NPTS      = 40
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(self.FOOT_H)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(self.FOOT_H_MIN)
+        self.setMaximumHeight(self.FOOT_H_MAX)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
 
         self._tx_now   = 0.0;  self._rx_now   = 0.0
@@ -795,13 +878,13 @@ class FooterBar(QWidget):
 
     def mousePressEvent(self, e):
         if (e.button() == Qt.MouseButton.LeftButton and
-                self._drive_rect.contains(e.position().toPoint()) and
-                len(self._drive_order) > 1):
+                not self._drive_rect.isNull() and
+                self._drive_rect.contains(e.position().toPoint())):
             self._show_drive_menu()
 
     def _show_drive_menu(self):
         menu = QMenu(self)
-        is_dark = _theme_name == "dark"
+        is_dark = _theme_name in _DARK_THEMES
         menu.setStyleSheet(
             "QMenu{background:#2a2a36;color:#dde0f0;border:1px solid #444;padding:4px;}"
             "QMenu::item{padding:5px 18px;}"
@@ -842,7 +925,7 @@ class FooterBar(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
-        bg = QColor(16, 16, 22) if _theme_name == "dark" else QColor(208, 210, 222)
+        bg = _t("titlebar_bg")
         p.fillRect(0, 0, w, h, bg)
         p.setPen(QPen(_t("border"), 1)); p.drawLine(0, 0, w, 0)
 
@@ -856,9 +939,9 @@ class FooterBar(QWidget):
         gy  = 5
         gh  = h - 10
 
-        # Fixed column widths — val_w tied to font size, not window width
-        lbl_w = 40                        # "NET" / "C:▾"
-        val_w = max(90, int(vsz * 8.0))  # "▲ 100.0 MB/s" — wide enough for full string
+        # Column widths — all tied to font size for consistent scaling
+        lbl_w = max(30, int(vsz * 3.5))  # "NET" / "C:▾"
+        val_w = max(70, int(vsz * 8.0))  # "▲ 100.0 MB/s"
 
         # ── NET half ──────────────────────────────────────────────
         val_x  = pad + lbl_w + 6
@@ -895,23 +978,26 @@ class FooterBar(QWidget):
 
         # ── DISK half ─────────────────────────────────────────────
         dx     = half + pad
-        dlbl_w = max(56, int(vsz * 5.0))   # wider to fit "C: ▾" without overlap
-        val_dx = dx + dlbl_w + 4
-        gx_d  = val_dx + val_w + 6
-        gw_d  = min(w - gx_d - pad, max_gw)
+        # Measure the actual drive label text width
+        dr_font = F(FONT_LBL, lsz, True)
+        dr_str  = (self._sel_drive or "C:") + "  ▾"
+        from PyQt6.QtGui import QFontMetrics
+        dr_fm   = QFontMetrics(dr_font)
+        dlbl_w  = dr_fm.horizontalAdvance(dr_str) + 16  # text + padding
+        val_dx  = dx + dlbl_w + 6
+        gx_d    = val_dx + val_w + 6
+        gw_d    = min(w - gx_d - pad, max_gw)
 
         if self._sel_drive and self._sel_drive in self._disk_io:
             d     = self._disk_io[self._sel_drive]
-            multi = len(self._drive_order) > 1
-            dr_str = self._sel_drive + ("  ▾" if multi else "")
+            dr_str = self._sel_drive + "  ▾"
             self._drive_rect = QRect(dx, 0, dlbl_w, h)
 
-            if multi:
-                hov = QColor(_t("blue")); hov.setAlpha(25)
-                p.setBrush(QBrush(hov)); p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(QRectF(dx - 3, 3, dlbl_w + 2, h - 6), 4, 4)
+            hov = QColor(_t("blue")); hov.setAlpha(25)
+            p.setBrush(QBrush(hov)); p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(QRectF(dx - 3, 3, dlbl_w + 2, h - 6), 4, 4)
 
-            p.setPen(PEN_DIM()); p.setFont(F(FONT_LBL, lsz, True))
+            p.setPen(PEN_DIM()); p.setFont(dr_font)
             p.drawText(QRect(dx, 0, dlbl_w, h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, dr_str)
 
@@ -1091,7 +1177,7 @@ class _SidePanelTab(QWidget):
         w, h = self.width(), self.height()
         c = QColor(_t("card"))
         if self._hovered:
-            c = c.lighter(130) if _theme_name == "dark" else c.darker(108)
+            c = c.lighter(130) if _theme_name in _DARK_THEMES else c.darker(108)
         p.fillRect(0, 0, w, h, c)
         p.setPen(PEN_BORDER()); p.drawLine(0, 0, 0, h)
         arrow = "◀" if self._expanded else "▶"
@@ -1112,10 +1198,10 @@ class SensorListPanel(QWidget):
     def __init__(self, on_visibility_change, parent=None):
         super().__init__(parent)
         self._on_vis  = on_visibility_change
-        self._expanded = True
+        self._expanded = False
         self._rows    = {}   # panel_id -> _ToggleRow
 
-        self.setFixedWidth(self.EXPANDED_W + 24)   # content + tab
+        self.setFixedWidth(24)   # start collapsed
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         outer = QHBoxLayout(self)
@@ -1152,8 +1238,11 @@ class SensorListPanel(QWidget):
         self._scroll.setWidget(content)
         outer.addWidget(self._scroll, stretch=1)
 
+        self._scroll.setVisible(False)  # start collapsed
+
         # Tab strip on right edge — toggle button between panel and main grid
         self._tab = _SidePanelTab(self.toggle_expand)
+        self._tab.set_expanded(False)
         outer.addWidget(self._tab)
 
     def _row_toggled(self, panel_id, visible):
@@ -1332,7 +1421,7 @@ class SettingsDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(380)
 
-        is_dark = _theme_name == "dark"
+        is_dark = _theme_name in _DARK_THEMES
         bg    = "#1a1a22" if is_dark else "#f0f0f6"
         text  = "#dde0f0" if is_dark else "#1e1e2e"
         lbl   = "#8890a0" if is_dark else "#606070"
@@ -1366,12 +1455,41 @@ class SettingsDialog(QDialog):
             self._monitor_cb.setCurrentIndex(0)
         layout.addRow("Display:", self._monitor_cb)
 
-        # Theme toggle
+        # Theme picker
         self._theme_cb = QComboBox()
-        self._theme_cb.addItem("🌙  Dark",  "dark")
-        self._theme_cb.addItem("☀  Light", "light")
-        self._theme_cb.setCurrentIndex(0 if _theme_name == "dark" else 1)
+        _theme_labels = {
+            "dark":      "Dark",
+            "light":     "Light",
+            "midnight":  "Midnight",
+            "cyberpunk": "Cyberpunk",
+            "nord":      "Nord",
+            "solarized": "Solarized",
+            "dracula":   "Dracula",
+            "amd":       "AMD Red",
+        }
+        cur_idx = 0
+        for i, key in enumerate(THEMES):
+            self._theme_cb.addItem(_theme_labels.get(key, key.title()), key)
+            if key == _theme_name:
+                cur_idx = i
+        self._theme_cb.setCurrentIndex(cur_idx)
         layout.addRow("Theme:", self._theme_cb)
+
+        # Gauge style
+        self._style_cb = QComboBox()
+        _style_labels = {
+            "arc":     "Arc Gauge",
+            "ring":    "Ring Gauge",
+            "bar":     "Bar Gauge",
+            "minimal": "Minimal",
+        }
+        style_idx = 0
+        for i, key in enumerate(["arc", "ring", "bar", "minimal"]):
+            self._style_cb.addItem(_style_labels[key], key)
+            if key == _gauge_style:
+                style_idx = i
+        self._style_cb.setCurrentIndex(style_idx)
+        layout.addRow("Gauge Style:", self._style_cb)
 
         # Accent colour
         self._accent_cb = QComboBox()
@@ -1413,10 +1531,11 @@ class SettingsDialog(QDialog):
 
     def get_values(self):
         return {
-            "monitor": self._monitor_cb.currentData(),
-            "startup": self._startup_cb.isChecked(),
-            "theme":   self._theme_cb.currentData(),
-            "accent":  self._accent_cb.currentData(),
+            "monitor":     self._monitor_cb.currentData(),
+            "startup":     self._startup_cb.isChecked(),
+            "theme":       self._theme_cb.currentData(),
+            "gauge_style": self._style_cb.currentData(),
+            "accent":      self._accent_cb.currentData(),
         }
 
 
@@ -1464,7 +1583,7 @@ class Card(QWidget):
                 not (e.buttons() & Qt.MouseButton.LeftButton)):
             return
         if ((e.position().toPoint() - self._drag_start).manhattanLength()
-                < QApplication.startDragDistance()):
+                < QApplication.startDragDistance() * 3):
             return
 
         drag = QDrag(self)
@@ -1899,47 +2018,207 @@ class Gauge(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        style = _gauge_style
+        if   style == "ring":    self._paint_ring(p)
+        elif style == "bar":     self._paint_bar(p)
+        elif style == "minimal": self._paint_minimal(p)
+        else:                    self._paint_arc(p)
+        p.end()
+
+    def _val_str(self):
+        return f"{self._disp:.0f}"
+
+    def _fit_sz(self, h_factor, w_avail, n_chars, mn=7):
+        """Font size that fits both height-proportional AND width-available."""
+        h = self.height()
+        return max(mn, min(int(h * h_factor), _fsz(w_avail, n_chars)))
+
+    # ── Style: Arc (default) ─────────────────────────────────────────────────
+    def _paint_arc(self, p):
         w, h   = self.width(), self.height()
         cx, cy = w / 2, h / 2 + h * 0.04
         r      = min(w, h) * 0.34
         pen_w  = max(6, r * 0.15)
+        avail  = w - 20
+        vs     = self._val_str()
 
-        title_size = max(7, int(h * 0.072))
+        title_sz = self._fit_sz(0.072, avail, len(self.title))
         p.setPen(PEN_DIM())
-        p.setFont(F(FONT_LBL, title_size))
+        p.setFont(F(FONT_LBL, title_sz))
         p.drawText(QRect(0, int(h * 0.03), w, int(h * 0.13)),
                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                    self.title)
 
         rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-
-        # Track arc
-        track_c = QColor(0,0,0,40) if _theme_name=="light" else QColor(255,255,255,22)
-        track_pen = QPen(track_c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        p.setPen(track_pen)
+        track_c = QColor(255,255,255,22) if _theme_name in _DARK_THEMES else QColor(0,0,0,40)
+        p.setPen(QPen(track_c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(rect, 225 * 16, -270 * 16)
 
-        # Filled arc — reuse cached colour objects
         ac   = self._arc_color()
         span = int(-270 * 16 * (self._disp / self.max_val))
         glow = QColor(ac); glow.setAlpha(40)
-        glow_pen = QPen(glow,  pen_w * 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        arc_pen  = QPen(ac,    pen_w,       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        p.setPen(glow_pen); p.drawArc(rect, 225 * 16, span)
-        p.setPen(arc_pen);  p.drawArc(rect, 225 * 16, span)
+        p.setPen(QPen(glow, pen_w * 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, 225 * 16, span)
+        p.setPen(QPen(ac, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, 225 * 16, span)
 
-        num_size = max(16, int(r * 0.56))
+        inner_w  = int(r * 1.6)
+        num_size = max(12, min(int(r * 0.56), _fsz(inner_w, len(vs))))
         p.setPen(PEN_TEXT())
         p.setFont(F(FONT_NUM, num_size, True))
         p.drawText(QRectF(cx - r, cy - r * 0.52, r * 2, r * 0.88),
-                   Qt.AlignmentFlag.AlignCenter, f"{self._disp:.0f}")
+                   Qt.AlignmentFlag.AlignCenter, vs)
 
-        unit_size = max(6, int(r * 0.19))
+        unit_sz = max(6, min(int(r * 0.19), _fsz(inner_w, len(self.unit))))
         p.setPen(PEN_DIM())
-        p.setFont(F(FONT_LBL, unit_size))
+        p.setFont(F(FONT_LBL, unit_sz))
         p.drawText(QRectF(cx - r, cy + r * 0.30, r * 2, r * 0.36),
                    Qt.AlignmentFlag.AlignCenter, self.unit)
-        p.end()
+
+    # ── Style: Ring (full 360° donut) ────────────────────────────────────────
+    def _paint_ring(self, p):
+        w, h   = self.width(), self.height()
+        cx, cy = w / 2, h / 2 + h * 0.02
+        r      = min(w, h) * 0.32
+        pen_w  = max(8, r * 0.18)
+        avail  = w - 20
+        vs     = self._val_str()
+
+        title_sz = self._fit_sz(0.068, avail, len(self.title))
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, title_sz))
+        p.drawText(QRect(0, int(h * 0.02), w, int(h * 0.11)),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   self.title)
+
+        rect = QRectF(cx - r, cy - r, r * 2, r * 2)
+        track_c = QColor(255,255,255,18) if _theme_name in _DARK_THEMES else QColor(0,0,0,30)
+        p.setPen(QPen(track_c, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        p.drawArc(rect, 90 * 16, -360 * 16)
+
+        ac   = self._arc_color()
+        span = int(-360 * 16 * (self._disp / self.max_val))
+        glow = QColor(ac); glow.setAlpha(30)
+        p.setPen(QPen(glow, pen_w * 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        p.drawArc(rect, 90 * 16, span)
+        p.setPen(QPen(ac, pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        p.drawArc(rect, 90 * 16, span)
+
+        inner_w  = int(r * 1.4)
+        num_size = max(12, min(int(r * 0.52), _fsz(inner_w, len(vs))))
+        p.setPen(PEN_TEXT())
+        p.setFont(F(FONT_NUM, num_size, True))
+        p.drawText(QRectF(cx - r, cy - r * 0.40, r * 2, r * 0.60),
+                   Qt.AlignmentFlag.AlignCenter, vs)
+
+        unit_sz = max(6, min(int(r * 0.18), _fsz(inner_w, len(self.unit))))
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, unit_sz))
+        p.drawText(QRectF(cx - r, cy + r * 0.15, r * 2, r * 0.35),
+                   Qt.AlignmentFlag.AlignCenter, self.unit)
+
+    # ── Style: Bar (horizontal progress bar) ─────────────────────────────────
+    def _paint_bar(self, p):
+        w, h  = self.width(), self.height()
+        pad   = max(8, int(w * 0.06))
+        pct   = self._disp / self.max_val
+        avail = w - pad * 2
+        vs    = self._val_str()
+
+        # Title top
+        title_sz = self._fit_sz(0.10, avail, len(self.title))
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, title_sz))
+        title_h = int(h * 0.18)
+        p.drawText(QRect(pad, int(h * 0.04), avail, title_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self.title)
+
+        # Value — big number + unit
+        disp_str = f"{vs} {self.unit}"
+        num_sz = self._fit_sz(0.30, avail, len(disp_str), mn=12)
+        p.setPen(PEN_TEXT())
+        p.setFont(F(FONT_NUM, num_sz, True))
+        val_y = title_h + int(h * 0.02)
+        val_h = int(h * 0.40)
+        p.drawText(QRect(pad, val_y, avail, val_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   vs)
+
+        # Unit next to value
+        unit_sz = max(6, int(num_sz * 0.45))
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, unit_sz))
+        from PyQt6.QtGui import QFontMetrics
+        val_fm = QFontMetrics(F(FONT_NUM, num_sz, True))
+        val_tw = val_fm.horizontalAdvance(vs)
+        p.drawText(QRect(pad + val_tw + 4, val_y, avail - val_tw, val_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                   self.unit)
+
+        # Bar
+        bar_y = val_y + val_h + int(h * 0.04)
+        bar_h = max(6, int(h * 0.08))
+        bar_w = avail
+
+        track_c = QColor(255,255,255,22) if _theme_name in _DARK_THEMES else QColor(0,0,0,30)
+        p.setBrush(QBrush(track_c))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(QRectF(pad, bar_y, bar_w, bar_h), bar_h / 2, bar_h / 2)
+
+        ac = self._arc_color()
+        fill_w = max(bar_h, bar_w * pct)
+        glow = QColor(ac); glow.setAlpha(50)
+        p.setBrush(QBrush(glow))
+        p.drawRoundedRect(QRectF(pad - 2, bar_y - 2, fill_w + 4, bar_h + 4),
+                          (bar_h + 4) / 2, (bar_h + 4) / 2)
+        p.setBrush(QBrush(ac))
+        p.drawRoundedRect(QRectF(pad, bar_y, fill_w, bar_h), bar_h / 2, bar_h / 2)
+
+    # ── Style: Minimal (big number + thin accent line) ───────────────────────
+    def _paint_minimal(self, p):
+        w, h  = self.width(), self.height()
+        pad   = max(8, int(w * 0.06))
+        pct   = self._disp / self.max_val
+        avail = w - pad * 2
+        vs    = self._val_str()
+
+        # Title — small, top-left
+        title_sz = self._fit_sz(0.080, avail, len(self.title), mn=6)
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, title_sz))
+        p.drawText(QRect(pad, int(h * 0.06), avail, int(h * 0.14)),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self.title)
+
+        # Big value — centered, constrained to width
+        num_sz = self._fit_sz(0.36, avail, len(vs), mn=14)
+        p.setPen(PEN_TEXT())
+        p.setFont(F(FONT_NUM, num_sz, True))
+        p.drawText(QRect(0, int(h * 0.15), w, int(h * 0.55)),
+                   Qt.AlignmentFlag.AlignCenter, vs)
+
+        # Unit — below value
+        unit_sz = self._fit_sz(0.09, avail, len(self.unit), mn=6)
+        p.setPen(PEN_DIM())
+        p.setFont(F(FONT_LBL, unit_sz))
+        p.drawText(QRect(0, int(h * 0.60), w, int(h * 0.14)),
+                   Qt.AlignmentFlag.AlignCenter, self.unit)
+
+        # Thin accent line at bottom
+        line_y = int(h * 0.82)
+        line_h = max(3, int(h * 0.025))
+        line_w = avail
+
+        track_c = QColor(255,255,255,15) if _theme_name in _DARK_THEMES else QColor(0,0,0,20)
+        p.setBrush(QBrush(track_c))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(QRectF(pad, line_y, line_w, line_h), line_h / 2, line_h / 2)
+
+        ac = self._arc_color()
+        fill_w = max(line_h, line_w * pct)
+        p.setBrush(QBrush(ac))
+        p.drawRoundedRect(QRectF(pad, line_y, fill_w, line_h), line_h / 2, line_h / 2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2166,9 +2445,10 @@ class CommandCenter(QMainWindow):
         self._drag_pos  = None
         self._settings  = load_settings()
 
-        # Apply saved theme + accent before building UI
-        global _theme_name
-        _theme_name = self._settings.get("theme", "dark")
+        # Apply saved theme + accent + gauge style before building UI
+        global _theme_name, _gauge_style
+        _theme_name  = self._settings.get("theme", "dark")
+        _gauge_style = self._settings.get("gauge_style", "arc")
         _apply_accent(self._settings.get("accent", "blue"))
 
         self.setWindowTitle("COMMAND CENTER")
@@ -2188,7 +2468,7 @@ class CommandCenter(QMainWindow):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._apply_data)
-        self._timer.start(1000)
+        self._timer.start(500)
 
         # Fast FPS refresh — polls ETW/RTSS counter directly, bypasses 1 s reader loop
         self._fps_timer = QTimer(self)
@@ -2338,13 +2618,23 @@ class CommandCenter(QMainWindow):
         self._net             = NetGraph()
         self._ssd             = SsdPanel()
 
-        # Card grid — dynamic, 3 columns max
-        main_widget = QWidget()
-        self._grid = QGridLayout(main_widget)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(10)
-        for c in range(4):
-            self._grid.setColumnStretch(c, 1)
+        # Card grid — resizable via QSplitter (rows × cols)
+        _SPLIT_CSS = (
+            "QSplitter::handle{background:rgba(255,255,255,0.06);border-radius:2px;margin:2px;}"
+            "QSplitter::handle:hover{background:rgba(60,140,255,0.35);}"
+            "QSplitter::handle:pressed{background:rgba(60,140,255,0.55);}"
+            if _theme_name in _DARK_THEMES else
+            "QSplitter::handle{background:rgba(0,0,0,0.08);border-radius:2px;margin:2px;}"
+            "QSplitter::handle:hover{background:rgba(60,140,255,0.35);}"
+            "QSplitter::handle:pressed{background:rgba(60,140,255,0.55);}"
+        )
+        self._split_css = _SPLIT_CSS
+        self._vsplitter = QSplitter(Qt.Orientation.Vertical)
+        self._vsplitter.setHandleWidth(8)
+        self._vsplitter.setChildrenCollapsible(False)
+        self._vsplitter.setStyleSheet(_SPLIT_CSS)
+        self._row_splitters = []  # horizontal splitters, one per row
+        main_widget = self._vsplitter
 
         # Load layout — migrate out legacy footer panels (network/disk moved to footer)
         _FOOTER_PANELS  = {"network", "disk_io", "net_ssd"}
@@ -2434,7 +2724,7 @@ class CommandCenter(QMainWindow):
             ns_l.addWidget(self._net, stretch=1)
             div = QWidget(); div.setFixedWidth(1)
             div.setStyleSheet(
-                "background: rgba(0,0,0,0.12);" if _theme_name == "light"
+                "background: rgba(0,0,0,0.12);" if _theme_name not in _DARK_THEMES
                 else "background: rgba(255,255,255,0.08);")
             ns_l.addWidget(div)
             ns_l.addWidget(self._ssd, stretch=1)
@@ -2443,6 +2733,22 @@ class CommandCenter(QMainWindow):
         return card
 
     # ── Panel swap ───────────────────────────────────────────────────────────
+    def _save_splitter_sizes(self):
+        """Capture current splitter sizes so they can be restored after rebuild."""
+        row_heights = self._vsplitter.sizes() if self._row_splitters else []
+        row_widths = []
+        for rs in self._row_splitters:
+            row_widths.append(rs.sizes())
+        return row_heights, row_widths
+
+    def _restore_splitter_sizes(self, row_heights, row_widths):
+        """Restore previously saved splitter sizes after rebuild."""
+        if row_heights and len(row_heights) == len(self._row_splitters):
+            self._vsplitter.setSizes(row_heights)
+        for i, rs in enumerate(self._row_splitters):
+            if i < len(row_widths) and len(row_widths[i]) == rs.count():
+                rs.setSizes(row_widths[i])
+
     def _swap_slot(self, slot_idx, new_panel_id):
         """Swap panel in slot_idx to new_panel_id. If new_panel_id is already
         placed elsewhere, the two slots swap their panels."""
@@ -2451,21 +2757,30 @@ class CommandCenter(QMainWindow):
         if old_panel_id == new_panel_id:
             return
 
+        # Save sizes before rebuild
+        saved = self._save_splitter_sizes()
+
         # Update layout
         if new_panel_id in layout:
             other_idx = layout.index(new_panel_id)
             layout[other_idx] = old_panel_id
         layout[slot_idx] = new_panel_id
 
-        # Rebuild entire grid — detach all widgets, destroy all cards, recreate
-        self._rebuild_all_slots()
+        # Rebuild grid, then restore sizes
+        self._rebuild_all_slots(saved=saved)
 
         # Persist
         self._settings["layout"] = ",".join(layout)
         save_settings(self._settings)
 
-    def _rebuild_all_slots(self):
-        """Rebuild card grid — visible panels reflow left→right, 3 per row."""
+    def _rebuild_all_slots(self, saved=None):
+        """Rebuild card grid — rows of horizontal splitters in a vertical
+        splitter.  Each card's WIDTH is individually resizable within its row.
+        Row HEIGHTS are resizable between rows."""
+        _MIN_CARD = 120
+        _N_COLS   = 4
+
+        # Detach all gauge widgets from old cards
         for w in (self._cpu_temp, self._cpu_load, self._cpu_power_gauge,
                   self._cpu_freq_gauge, self._cpu_voltage_gauge,
                   self._cpu_elec_gauge, self._cpu_therm_gauge,
@@ -2478,29 +2793,54 @@ class CommandCenter(QMainWindow):
 
         for card in self._slot_cards:
             if card is not None:
-                self._grid.removeWidget(card)
                 card.setParent(None)
                 card.deleteLater()
 
-        # Clear row stretches
-        for r in range(5):
-            self._grid.setRowStretch(r, 0)
+        for rs in self._row_splitters:
+            rs.setParent(None)
+            rs.deleteLater()
+        self._row_splitters.clear()
 
         visible = [(i, pid) for i, pid in enumerate(self._current_layout)
                    if pid not in self._hidden_panel_ids]
 
         self._slot_cards = [None] * len(self._current_layout)
-        for pos, (slot_idx, panel_id) in enumerate(visible):
-            card = self._create_panel_card(panel_id, slot_idx)
-            row  = pos // 4
-            col  = pos % 4
-            self._grid.addWidget(card, row, col)
-            self._slot_cards[slot_idx] = card
-            card.show()
 
-        n_rows = max(1, (len(visible) + 3) // 4)
-        for r in range(n_rows):
-            self._grid.setRowStretch(r, 1)
+        # Group into rows of _N_COLS
+        rows = []
+        for pos, (slot_idx, panel_id) in enumerate(visible):
+            row_idx = pos // _N_COLS
+            if row_idx >= len(rows):
+                rows.append([])
+            rows[row_idx].append((slot_idx, panel_id))
+
+        for row_items in rows:
+            hsplitter = QSplitter(Qt.Orientation.Horizontal)
+            hsplitter.setHandleWidth(8)
+            hsplitter.setChildrenCollapsible(False)
+            hsplitter.setStyleSheet(self._split_css)
+            hsplitter.setMinimumHeight(_MIN_CARD)
+
+            for slot_idx, panel_id in row_items:
+                card = self._create_panel_card(panel_id, slot_idx)
+                card.setMinimumWidth(_MIN_CARD)
+                card.setMinimumHeight(_MIN_CARD)
+                hsplitter.addWidget(card)
+                self._slot_cards[slot_idx] = card
+                card.show()
+
+            eq_w = max(150, self._vsplitter.width() // max(len(row_items), 1))
+            hsplitter.setSizes([eq_w] * len(row_items))
+
+            self._vsplitter.addWidget(hsplitter)
+            self._row_splitters.append(hsplitter)
+
+        # Restore saved sizes or set equal defaults
+        if saved:
+            self._restore_splitter_sizes(*saved)
+        elif self._row_splitters:
+            eq_h = max(150, self._vsplitter.height() // max(len(self._row_splitters), 1))
+            self._vsplitter.setSizes([eq_h] * len(self._row_splitters))
 
     def _on_sensor_vis_change(self, panel_id, visible):
         """Called by SensorListPanel when user clicks an eye toggle."""
@@ -2527,7 +2867,7 @@ class CommandCenter(QMainWindow):
                     self._pending_data = d
             except Exception as ex:
                 print(f"[reader] {ex}")
-            time.sleep(1.0)
+            time.sleep(0.5)
 
     def _update_fps_fast(self):
         """250 ms timer — pushes real RTSS fps when available; GPU estimate via _apply_data."""
@@ -2612,18 +2952,23 @@ class CommandCenter(QMainWindow):
         dlg = SettingsDialog(self._settings, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             vals = dlg.get_values()
-            self._settings["monitor"] = vals["monitor"]
-            self._settings["startup"] = vals["startup"]
-            self._settings["theme"]   = vals["theme"]
-            self._settings["accent"]  = vals["accent"]
+            self._settings["monitor"]     = vals["monitor"]
+            self._settings["startup"]     = vals["startup"]
+            self._settings["theme"]       = vals["theme"]
+            self._settings["gauge_style"] = vals["gauge_style"]
+            self._settings["accent"]      = vals["accent"]
             save_settings(self._settings)
             set_startup(vals["startup"])
-            self._apply_theme(vals["theme"], vals["accent"])
+            self._apply_theme(vals["theme"], vals["accent"],
+                              vals["gauge_style"])
             self._apply_monitor()
 
-    def _apply_theme(self, theme_name: str, accent_name: str = None):
-        global _theme_name
+    def _apply_theme(self, theme_name: str, accent_name: str = None,
+                     gauge_style: str = None):
+        global _theme_name, _gauge_style
         _theme_name = theme_name
+        if gauge_style:
+            _gauge_style = gauge_style
         if accent_name:
             _apply_accent(accent_name)
         _PC.rebuild()

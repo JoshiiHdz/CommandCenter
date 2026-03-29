@@ -157,8 +157,8 @@ def _hwinfo_read_all(d: "SensorData"):
 
     _CPU_PWR  = ("cpu package power", "cpu ppt", "cpu power",
                  "package power", "cpu socket power", "cpu total power")
-    _CPU_VOLT = ("cpu core voltage", "cpu vcore", "vcore",
-                 "cpu vid", "core voltage", "cpu voltage")
+    _CPU_VOLT = ("cpu vddcr_vdd voltage", "cpu core voltage", "cpu vcore",
+                 "vcore", "cpu vid", "core voltage", "cpu voltage")
     _GPU_VOLT = ("gpu core voltage", "gpu voltage", "gpu vcore",
                  "gpu vid", "gpu core volt")
 
@@ -188,10 +188,10 @@ def _hwinfo_read_all(d: "SensorData"):
         if unit in ("", "c", "\xb0c", "°c") and 0 < val < 150:
             if cpu_temp == 0.0 and any(k in label_l for k in _CPU_TEMP_LABELS):
                 cpu_temp = val
-            elif gpu_temp == 0.0 and "gpu" in label_l and any(
+            elif "gpu" in label_l and any(
                     k in label_l for k in ("gpu temperature", "gpu temp", "gpu core temp",
                                            "gpu diode", "gpu hotspot")):
-                gpu_temp = val
+                gpu_temp = val  # last match wins (dGPU over iGPU)
             elif any(k in label_l for k in ("spd hub", "dimm", "sodimm",
                                                    "memory temp", "ram temp",
                                                    "tsensor_mem", "ts0_temp", "ts1_temp")):
@@ -214,33 +214,36 @@ def _hwinfo_read_all(d: "SensorData"):
         elif unit == "w" and 0 < val < 1000:
             if cpu_power == 0.0 and any(label_l == p or label_l.startswith(p) for p in _CPU_PWR):
                 cpu_power = val
-            elif gpu_power == 0.0 and "gpu" in label_l and any(
+            elif "gpu" in label_l and any(
                     k in label_l for k in ("gpu power", "gpu total", "gpu board", "total board power")):
-                gpu_power = val
+                gpu_power = val  # last match wins
 
-        # Voltages
-        elif unit == "v" and 0.1 < val < 3.0:
-            if cpu_volt == 0.0 and any(label_l == p or label_l.startswith(p) for p in _CPU_VOLT):
-                cpu_volt = val
-            elif gpu_volt == 0.0 and any(label_l == p or label_l.startswith(p) for p in _GPU_VOLT):
-                gpu_volt = val
+        # Voltages (V or mV)
+        elif unit in ("v", "mv") and val > 0:
+            v_volts = val / 1000.0 if unit == "mv" else val
+            if v_volts > 3.0:
+                pass  # skip out-of-range
+            elif cpu_volt == 0.0 and any(label_l == p or label_l.startswith(p) for p in _CPU_VOLT):
+                cpu_volt = v_volts
+            elif any(label_l == p or label_l.startswith(p) for p in _GPU_VOLT):
+                gpu_volt = v_volts  # last match wins
 
         # GPU load (%)
         elif unit == "%" and 0 <= val <= 100:
-            if gpu_load == 0.0 and "gpu" in label_l and any(
-                    k in label_l for k in ("gpu core load", "gpu load", "gpu utilization",
+            if "gpu" in label_l and any(
+                    k in label_l for k in ("gpu core load", "gpu load",
                                            "gpu usage", "3d load", "gpu d3d")):
-                gpu_load = val
+                gpu_load = val  # last match wins
 
         # GPU / CPU clocks (MHz)
         elif unit == "mhz" and val > 0:
-            if gpu_core_clk == 0.0 and "gpu" in label_l and any(
+            if "gpu" in label_l and any(
                     k in label_l for k in ("gpu core clock", "gpu clock", "gpu shader",
                                            "gpu frequency", "gpu engine")):
-                if "memory" not in label_l:
-                    gpu_core_clk = val
-            elif gpu_mem_clk == 0.0 and "gpu" in label_l and "memory" in label_l:
-                gpu_mem_clk = val
+                if "memory" not in label_l and "effective" not in label_l:
+                    gpu_core_clk = val  # last match wins
+            elif "gpu" in label_l and "memory" in label_l and "clock" in label_l:
+                gpu_mem_clk = val  # last match wins
             elif cpu_freq == 0.0 and any(
                     k in label_l for k in ("cpu package frequency", "cpu frequency",
                                            "cpu clock", "effective clock")):
@@ -248,19 +251,18 @@ def _hwinfo_read_all(d: "SensorData"):
 
         # GPU memory used (MB)
         elif unit == "mb" and val >= 0:
-            if gpu_mem_used == 0.0 and "gpu" in label_l and "used" in label_l:
-                gpu_mem_used = val
+            if "gpu" in label_l and ("memory allocated" in label_l or "used" in label_l):
+                gpu_mem_used = val  # last match wins
 
         # CPU current (Amperes) — electrical (EDC) and thermal (TDC)
         elif unit == "a" and 0 < val < 1000:
             if cpu_elec_current == 0.0 and any(
-                    k in label_l for k in ("edc", "electrical current", "cpu ia",
-                                           "cpu package current", "cpu current",
-                                           "ia current", "electrical")):
+                    k in label_l for k in ("cpu edc", "edc", "electrical current",
+                                           "electrical design current")):
                 cpu_elec_current = val
             elif cpu_therm_current == 0.0 and any(
-                    k in label_l for k in ("tdc", "thermal current", "cpu tj",
-                                           "thermal design current", "thermal")):
+                    k in label_l for k in ("cpu tdc", "tdc", "thermal current",
+                                           "thermal design current")):
                 cpu_therm_current = val
 
         # Flow rates — water cooling controllers (Aquaero, Octo, mobo headers)
@@ -300,22 +302,18 @@ def _hwinfo_read_all(d: "SensorData"):
             log.info("HWiNFO fans: %s", ", ".join(f"{n}={rpm:.0f}" for n, rpm in fans))
         if dimm_temps:
             log.info("HWiNFO DIMMs: %s", ", ".join(f"{lbl}={t:.1f}C" for lbl, t in dimm_temps))
-        # Log all Ampere-unit sensors so we can see exact HWiNFO label names
-        _amp_sensors = []
+        # Dump ALL sensors on first read for debugging
         for i in range(n_reading):
             base = off_reading + i * sz_reading
             if base + OFF_VALUE + 8 > len(data):
                 break
-            u = data[base + OFF_UNIT : base + OFF_UNIT + 16].split(b'\x00')[0].decode("latin-1", errors="ignore").strip().lower()
-            if u == "a":
-                lbl = data[base + OFF_LABEL : base + OFF_LABEL + 128].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
-                try:
-                    v = _struct.unpack_from("<d", data, base + OFF_VALUE)[0]
-                    _amp_sensors.append(f"{lbl}={v:.1f}A")
-                except Exception:
-                    pass
-        if _amp_sensors:
-            log.info("HWiNFO Ampere sensors: %s", ", ".join(_amp_sensors))
+            lbl = data[base + OFF_LABEL : base + OFF_LABEL + 128].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+            u = data[base + OFF_UNIT : base + OFF_UNIT + 16].split(b'\x00')[0].decode("latin-1", errors="ignore").strip()
+            try:
+                v = _struct.unpack_from("<d", data, base + OFF_VALUE)[0]
+            except Exception:
+                v = 0.0
+            log.info("HWiNFO [%03d] %-45s  %10.2f  %s", i, lbl, v, u)
 
 _hwinfo_logged_once = False
 
